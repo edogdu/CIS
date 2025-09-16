@@ -1,0 +1,305 @@
+version: "3.9"
+
+volumes:
+  kafka-data: 
+    driver: local
+  zookeeper-data: 
+    driver: local
+  neo4j-data: 
+    driver: local
+  timescaledb-data: 
+    driver: local
+  test_data_loader-data: 
+    driver: local
+networks:
+  crit_infra_net:
+    driver: bridge
+services:
+    cis_zookeeper:
+      image: bitnami/zookeeper:latest
+      container_name: cis_zookeeper
+      restart: unless-stopped
+      ports:
+        - "2181:2181"
+      environment:
+        ALLOW_ANONYMOUS_LOGIN: "yes"
+      volumes:
+        - "zookeeper-data:/bitnami"
+      networks:
+        - crit_infra_net    
+    cis_kafka:
+      image: bitnami/kafka:latest
+      container_name: cis_kafka
+      hostname: kafka
+      restart: unless-stopped
+      ports:
+        - "9092:9092"
+      depends_on:
+        - cis_zookeeper
+      environment:        
+          KAFKA_CFG_NODE_ID: 1
+          KAFKA_CFG_ZOOKEEPER_CONNECT: zookeeper:2181                    
+          ALLOW_PLAINTEXT_LISTENER: yes
+          KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CLIENT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+          KAFKA_CFG_LISTENERS: CLIENT://:9092,EXTERNAL://:9093,CONTROLLER://:9091
+          KAFKA_CFG_ADVERTISED_LISTENERS: CLIENT://kafka:9092,EXTERNAL://localhost:9093          
+          KAFKA_CFG_PROCESS_ROLES: controller,broker
+          KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER          
+          KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka:9091
+          KAFKA_CLUSTER_ID: 5b2X6dNoQaicUKKip0TQog
+          KAFKA_CFG_INTER_BROKER_LISTENER_NAME: CLIENT
+          KAFKA_HEAP_OPTS: "-Xmx256M -Xms256M"
+          
+
+          KAFKA_CREATE_TOPICS: "Data.Raw.Physical:1:1,Data.Raw.Scada:1:1,Data.Error:1:1,Data.Graphs:1:1, Anomaly.Predict:1:1,Anomaly.Alerts:1:1"
+          
+      volumes:
+        - "kafka-data:/bitnami"
+      networks:
+        - crit_infra_net
+    cis_neo4j:
+      image: neo4j:4.4.0-enterprise
+      container_name: cis_neo4j
+      hostname: cis_neo4j
+      restart: always
+      ports:
+        - "7485:7485"
+        - "7698:7698"
+      environment:
+        NEO4J_AUTH: "neo4j/changeme" # Default password if not set in env
+        NEO4J_apoc_trigger_enabled: "true"
+        NEO4JLABS_PLUGINS: '["apoc", "n10s"]' # Include n10s (Neosemantics) plugin
+        NEO4J_ACCEPT_LICENSE_AGREEMENT: 'yes' # Required if using Enterprise version
+        NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
+        NEO4J_apoc_import_file_enabled: "true"
+        NEO4J_apoc_initializer_cypher: "CALL apoc.cypher.runFiles(['file:///init.cypher'])"
+        NEO4J_dbms_jvm_additional: "-XX:-UseContainerSupport"
+        NEO4J_dbms_connector_http_listen__address: ":7485"
+        NEO4J_dbms_connector_bolt_listen__address: ":7698"
+        NEO4J_dbms_connector_http_advertised_address: "localhost:7485"
+        NEO4J_dbms_connector_bolt_advertised_address: "localhost:7698"
+      volumes:
+        - neo4j-data:/data        
+        - ./services/neo4j/import:/var/lib/neo4j/import # Mount the import directory for initial cypher scripts
+      networks:
+        - crit_infra_net
+    cis_timescaledb:
+      image: timescale/timescaledb:latest-pg14
+      container_name: cis_timescaledb
+      hostname: timescaledb
+      restart: unless-stopped
+      ports:
+        - "5445:5432"
+      environment:
+        POSTGRES_USER: "postgres"
+        POSTGRES_PASSWORD: "password"
+        POSTGRES_DB: "anomalydetection"
+      healthcheck:
+        test: ["CMD-SHELL", "pg_isready -U postgres -d anomalydetection"]
+        interval: 10s
+        timeout: 5s
+        retries: 10
+      volumes:
+        - timescaledb-data:/var/lib/postgresql/data
+      networks:
+        - crit_infra_net
+      
+    cis_test_data_loader:
+      build: services/test_data_load
+      container_name: cis_test_data_load
+      restart: unless-stopped
+      ports:
+        - "8090:8090"
+      depends_on:
+        - cis_kafka
+        - cis_zookeeper        
+      environment:
+        KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+        KAFKA_PHYS_TOPIC: "Data.Raw.Physical"
+        KAFKA_SCADA_TOPIC: "Data.Raw.Scada"
+        KAFKA_GENERATE_GRAPH_TOPIC: "Data.Graphs"
+        DATA_DIR: "/app/data"
+        SCHEMA_DIR: "/app/schemas"
+      volumes:
+        - ./data:/app/data
+        - ./schemas:/app/schemas 
+      networks:
+        - crit_infra_net
+    cis_dash_app:
+      build: dash_app
+      container_name: cis_dash_app
+      restart: unless-stopped
+      ports:
+        - "8050:8050"
+      depends_on:
+        - cis_timescaledb
+        - cis_neo4j
+      environment:
+        TIMESCALEDB_HOST: "timescaledb"
+        TIMESCALEDB_PORT: 5432
+        TIMESCALEDB_DB: "anomalydetection"
+        TIMESCALEDB_USER: "postgres"
+        TIMESCALEDB_PASSWORD: "password"
+        NEO4J_HOST: "cis_neo4j"
+        NEO4J_PORT: 7687
+        NEO4J_USER: "neo4j"
+        NEO4J_PASSWORD: "gr@ph$Rfun!"
+      networks:
+        - crit_infra_net
+    cis_raw_network_consumer:
+      build: .
+      container_name: cis_raw_network_consumer
+      restart: unless-stopped
+      command: python src/data_ingestion/raw_network_consumer.py
+      depends_on:
+        - cis_kafka
+        - cis_timescaledb
+        - cis_neo4j
+      environment:
+        KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+        KAFKA_TOPIC: "Data.Raw.Scada"
+        TIMESCALEDB_HOST: "timescaledb"
+        TIMESCALEDB_PORT: 5432
+        TIMESCALEDB_DB: "anomalydetection"
+        TIMESCALEDB_USER: "postgres"
+        TIMESCALEDB_PASSWORD: "password"
+      networks:
+        - crit_infra_net
+      volumes:
+        - ./Logs/kafka:/app/logs
+    cis_raw_physical_consumer:
+      build: .
+      container_name: cis_raw_physical_consumer
+      restart: unless-stopped
+      command: python src/data_ingestion/raw_physical_consumer.py
+      depends_on:
+        - cis_kafka
+        - cis_timescaledb
+        - cis_neo4j
+      environment:
+        KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+        KAFKA_TOPIC: "Data.Raw.Physical"
+        TIMESCALEDB_HOST: "timescaledb"
+        TIMESCALEDB_PORT: 5432
+        TIMESCALEDB_DB: "anomalydetection"
+        TIMESCALEDB_USER: "postgres"
+        TIMESCALEDB_PASSWORD: "password"
+      networks:
+        - crit_infra_net
+      volumes:
+        - ./Logs/kafka:/app/logs
+    cis_data_error_consumer:
+      build: .
+      container_name: cis_data_error_consumer
+      restart: unless-stopped
+      command: python src/data_ingestion/data_error_consumer.py
+      depends_on:
+        - cis_kafka
+        - cis_timescaledb
+        - cis_neo4j
+      environment:
+        KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+        KAFKA_DATA_ERROR_TOPIC: "Data.Error"
+        TIMESCALEDB_HOST: "timescaledb"
+        TIMESCALEDB_PORT: 5432
+        TIMESCALEDB_DB: "anomalydetection"
+        TIMESCALEDB_USER: "postgres"
+        TIMESCALEDB_PASSWORD: "password"
+      networks:
+        - crit_infra_net
+      volumes:
+        - ./Logs/kafka:/app/logs
+    cis_graph_generator_consumer:
+      build: .
+      container_name: cis_graph_generator_consumer
+      restart: unless-stopped
+      command: python src/graph_generation/graph_generator_consumer.py
+      depends_on:
+        - cis_kafka
+        - cis_timescaledb
+        - cis_neo4j
+      environment:
+        KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+        KAFKA_TOPIC: "Data.Graphs"
+        TIMESCALEDB_HOST: "timescaledb"
+        TIMESCALEDB_PORT: 5432
+        TIMESCALEDB_DB: "anomalydetection"
+        TIMESCALEDB_USER: "postgres"
+        TIMESCALEDB_PASSWORD: "password"
+        NEO4J_HOST: "cis_neo4j"
+        NEO4J_PORT: 7687
+        NEO4J_USER: "neo4j"
+        NEO4J_PASSWORD: "gr@ph$Rfun!"
+      networks:
+        - crit_infra_net
+      volumes:
+        - ./Logs/kafka:/app/logs
+    cis_anomaly_detector_consumer:
+      build: .
+      container_name: cis_anomaly_detector_consumer
+      restart: unless-stopped
+      command: python src/anomaly_detection/anomaly_detection_consumer.py
+      depends_on:
+        - cis_kafka
+        - cis_timescaledb
+        - cis_neo4j
+      environment:
+        KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+        KAFKA_TOPIC: "Data.Graphs"
+        TIMESCALEDB_HOST: "timescaledb"
+        TIMESCALEDB_PORT: 5432
+        TIMESCALEDB_DB: "anomalydetection"
+        TIMESCALEDB_USER: "postgres"
+        TIMESCALEDB_PASSWORD: "password"
+        NEO4J_HOST: "cis_neo4j"
+        NEO4J_PORT: 7687
+        NEO4J_USER: "neo4j"
+        NEO4J_PASSWORD: "gr@ph$Rfun!"
+      networks:
+        - crit_infra_net
+      volumes:
+        - ./Logs/kafka:/app/logs
+    cis_alerts_consumer:
+      build: .
+      container_name: cis_alerts_consumer
+      restart: unless-stopped
+      command: python src/alerts/alerts_consumer.py
+      depends_on:
+        - cis_kafka
+        - cis_timescaledb
+        - cis_neo4j
+      environment:
+        KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+        KAFKA_TOPIC: "Anomaly.Alerts"
+        TIMESCALEDB_HOST: timescaledb
+        TIMESCALEDB_PORT: 5432
+        TIMESCALEDB_DB: "anomalydetection"
+        TIMESCALEDB_USER: "postgres"
+        TIMESCALEDB_PASSWORD: "password"
+        NEO4J_HOST: "cis_neo4j"
+        NEO4J_PORT: 7687
+        NEO4J_USER: "neo4j"
+        NEO4J_PASSWORD: "gr@ph$Rfun!"
+      networks:
+        - crit_infra_net
+      volumes:
+        - ./Logs/kafka:/app/logs
+    cis_init_timescaledb:
+      build: services/postgres
+      container_name: cis_init_timescaledb
+      depends_on:
+        cis_timescaledb:
+          condition: service_healthy
+      environment:
+        PGHOST: timescaledb
+        PGPORT: 5432
+        PGUSER: "postgres"
+        PGPASSWORD: "password"
+        PGDATABASE: "anomalydetection"
+        PGSSLMODE: "disable"
+      networks:
+        - crit_infra_net
+      command: bash -c "python init_db.py && python load_testbed_metadata.py"
+      restart: "no"
+      # This service runs once to initialize the database and then exits
+      

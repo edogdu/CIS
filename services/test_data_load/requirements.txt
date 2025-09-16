@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+aiokafka
+python-dotenv
+pydantic
+pandas
+psycopg2-binary
