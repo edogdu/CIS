@@ -18,6 +18,3 @@ __pycache__/
 ./**/.venv
 .venv/
 !.gitkeep
-Logs/
-Logs/*
-Logs/**/*
