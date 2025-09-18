@@ -1,4 +1,4 @@
-FROM python:3.11-bookworm
+FROM python:3.11-slim
 
 # Install system dependencies and build tools
 # 'gcc' is the C compiler, 'python3-dev' includes Python header files

@@ -24,7 +24,6 @@ class ScadaLog(BaseModel):
     def load_from_dataframe(system_id:str, df: DataFrame) -> list["ScadaLog"]:
         logs = []
         for _, row in df.iterrows():
-            print(row.head())
             log = ScadaLog(
                 id=f"{system_id}_{row['Time']}_{row['mac_s']}_{row['mac_d']}",
                 system_id=system_id,
@@ -48,7 +47,6 @@ class ScadaLog(BaseModel):
                 }
             )
             logs.append(log)
-            print(f"Created log: {log}")
         return logs
     
 

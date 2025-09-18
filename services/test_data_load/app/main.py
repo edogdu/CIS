@@ -41,21 +41,23 @@ async def aggregate_scada_logs():
         for filename in all_files:
             print(f"Processing file: {filename}")
             df = pd.read_csv(filename)            
-            df.columns = df.columns.str.strip()  # Strip whitespace from column names
-            df.astype({'Time': 'datetime64[ns]', 'sport': 'Int64', 'dport': 'Int64', 'n_pkt_src': 'Int64', 'n_pkt_dst': 'Int64', 'size': 'Int64'})
+            df.columns = df.columns.str.strip()  # Strip whitespace from column names                        
             df.fillna({
                 'sport': 0,
                 'dport': 0,
                 'n_pkt_src': 0,
                 'n_pkt_dst': 0,
                 'size': 0
-            })  # Check for NaN in critical columns
-            
+            }, inplace=True)  # Check for NaN in critical columns
+            df = df.where(pd.notnull(df), None)  # Replace NaN with None
+            #Time,mac_s,mac_d,ip_s,ip_d,sport,dport,proto,flags,size,
+            # modbus_fn,n_pkt_src,n_pkt_dst,modbus_response,label_n,label
             
             messages = ScadaLog.load_from_dataframe(system_id='testbed_system_1', df=df)
+            print(f"Generated {len(messages)} messages from file {filename}")
             for msg in messages:
                 await producer.send(topic=kafka_scada_topic, value=msg.json().encode('utf-8'))
-                await producer.flush()
+                #await producer.flush()
     except Exception as e:
         print(f"Error occurred: {e}")        
     finally:
@@ -75,9 +77,10 @@ async def aggregate_physical_logs():
             df.columns = df.columns.str.strip()  # Strip whitespace from column names
             df = df.where(pd.notnull(df), None)  # Replace NaN with None
             messages = PhysicalLog.load_from_dataframe(system_id='testbed_system_1', df=df)
+            print(f"Generated {len(messages)} messages from file {filename}")
             for msg in messages:
                 await producer.send(topic=kafka_phys_topic, value=msg.json().encode('utf-8'))
-                await producer.flush()
+                #await producer.flush()
     except Exception as e:
         print(f"Error occurred: {e}")
     finally:

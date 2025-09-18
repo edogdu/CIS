@@ -3,60 +3,152 @@ version: "3.9"
 volumes:
   kafka-data: 
     driver: local
-  zookeeper-data: 
-    driver: local
   neo4j-data: 
     driver: local
   timescaledb-data: 
     driver: local
   test_data_loader-data: 
     driver: local
+  spark-data:
+    driver: local
 networks:
   crit_infra_net:
     driver: bridge
 services:
-    cis_zookeeper:
-      image: bitnami/zookeeper:latest
-      container_name: cis_zookeeper
+    cis-spark-master:
+      image: bitnami/spark:3.5
+      container_name: cis-spark-master
       restart: unless-stopped
-      ports:
-        - "2181:2181"
       environment:
-        ALLOW_ANONYMOUS_LOGIN: "yes"
-      volumes:
-        - "zookeeper-data:/bitnami"
+        SPARK_MODE: "master"
+      ports:
+        - "8080:8080"
+        - "7077:7077"
       networks:
-        - crit_infra_net    
+        - crit_infra_net
+      volumes:
+        - spark-data:/bitnami
+        - ./Logs/spark:/logs
+        - ./data:/data
+    cis_spark_worker:
+      image: bitnami/spark:3.5
+      container_name: cis_spark_worker
+      restart: unless-stopped
+      environment:
+        SPARK_MODE: "worker"
+        SPARK_MASTER_URL: "spark://cis-spark-master:7077"
+        SPARK_WORKER_MEMORY: "16G"
+        SPARK_WORKER_CORES: "8"
+      ports:
+        - "8089:8081"
+      depends_on:
+        - cis-spark-master
+      networks:
+        - crit_infra_net
+      volumes:
+        - spark-data:/bitnami
+        - ./Logs/spark:/logs
+        - ./data:/data
+    cis_load_bigdata:
+      build: services/spark
+      container_name: cis_load_bigdata
+      restart: "no"
+      depends_on:
+        - cis-spark-master
+        - cis_spark_worker
+        - cis_kafka
+      networks:
+        - crit_infra_net
+      volumes:
+        - spark-data:/bitnami
+        - ./Logs/spark:/logs
+        - ./data:/data
+        - ./services/spark/data_scripts:/data_scripts
+      environment:
+        HOME: "/tmp"
+        USER: "spark"
+        HADOOP_USER_NAME: "spark"
+        SPARK_SUBMIT_OPTS: "-Dspark.jars.ivy=/tmp/.ivy2 -Duser.home=/tmp -Duser.name=spark"
+        SPARK_MASTER_URL: "spark://cis-spark-master:7077"
+        KAFKA_BOOTSTRAP_SERVERS: "cis_kafka:9092"
+        KAFKA_PHYS_TOPIC: "Data.Raw.Physical"
+        KAFKA_SCADA_TOPIC: "Data.Raw.Scada"
+        PHYS_DATA_DIR: "file:///data/testbed_system_1/Physical"
+        SCADA_DATA_DIR: "file:///data/testbed_system_1/Network/csv"
+      entrypoint: 
+        - "/opt/bitnami/spark/bin/spark-submit"
+        - "--master"
+        - "spark://cis-spark-master:7077"
+        - "--conf"
+        - "spark.hadoop.hadoop.security.authentication=simple"
+        - "--conf"
+        - "spark.authenticate=false"
+        - "--conf"
+        - "spark.hadoop.fs.defaultFS=file:///"
+        - "--conf"
+        - "spark.hadoop.fs.file.impl=org.apache.hadoop.fs.LocalFileSystem"
+        - "--conf"
+        - "spark.driver.extraJavaOptions=-Duser.name=spark -Duser.home=/tmp"
+        - "--conf"
+        - "spark.executor.extraJavaOptions=-Duser.name=spark -Duser.home=/tmp"
+        - "--conf"
+        - "spark.jars.ivy=/tmp/.ivy2"
+        - "--conf"
+        - "spark.executor.instances=2"
+        - "--conf"
+        - "spark.executor.memory=8g"
+        - "--conf"
+        - "spark.executor.cores=4"
+        - "--conf"
+        - "spark.driver.memory=8g"
+        - "--packages"
+        - "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1"
+        - "/data_scripts/load_bigdata.py"
+
+
     cis_kafka:
       image: bitnami/kafka:latest
-      container_name: cis_kafka
-      hostname: kafka
+      container_name: cis_kafka      
       restart: unless-stopped
       ports:
         - "9092:9092"
-      depends_on:
-        - cis_zookeeper
+      healthcheck:
+        test: ["CMD", "kafka-broker-api-versions.sh", "--bootstrap-server", "cis_kafka:9092"]
+        interval: 30s
+        timeout: 10s
+        retries: 5
       environment:        
-          KAFKA_CFG_NODE_ID: 1
-          KAFKA_CFG_ZOOKEEPER_CONNECT: zookeeper:2181                    
-          ALLOW_PLAINTEXT_LISTENER: yes
-          KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CLIENT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
-          KAFKA_CFG_LISTENERS: CLIENT://:9092,EXTERNAL://:9093,CONTROLLER://:9091
-          KAFKA_CFG_ADVERTISED_LISTENERS: CLIENT://kafka:9092,EXTERNAL://localhost:9093          
-          KAFKA_CFG_PROCESS_ROLES: controller,broker
-          KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER          
-          KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka:9091
-          KAFKA_CLUSTER_ID: 5b2X6dNoQaicUKKip0TQog
-          KAFKA_CFG_INTER_BROKER_LISTENER_NAME: CLIENT
-          KAFKA_HEAP_OPTS: "-Xmx256M -Xms256M"
+          KAFKA_ENABLE_KRAFT: "yes"
+          KAFKA_CFG_NODE_ID: "1"
+          KAFKA_CFG_PROCESS_ROLES: "broker,controller"
+          KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: "1@cis_kafka:9093"
           
+          KAFKA_CFG_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+          KAFKA_CFG_ADVERTISED_LISTENERS: "PLAINTEXT://cis_kafka:9092"
+          KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+          KAFKA_CFG_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+          KAFKA_CFG_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
 
-          KAFKA_CREATE_TOPICS: "Data.Raw.Physical:1:1,Data.Raw.Scada:1:1,Data.Error:1:1,Data.Graphs:1:1, Anomaly.Predict:1:1,Anomaly.Alerts:1:1"
-          
+          KAFKA_HEAP_OPTIONS: "-Xms6g -Xmx6g"
+          KAFKA_CFG_NUM_NETWORK_THREADS: "6"
+          KAFKA_CFG_NUM_IO_THREADS: "16"
+          KAFKA_CFG_SOCKET_SEND_BUFFER_BYTES: "1048576"
+          KAFKA_CFG_MESSAGE_MAX_BYTES: "2000000"
+          KAFKA_CFG_REPLICA_SOCKET_RECEIVE_BUFFER_BYTES: "1048576"
+
+          KAFKA_CFG_DEFAULT_REPLICATION_FACTOR: "1"
+          KAFKA_CFG_OFFSET_TOPIC_REPLICATION_FACTOR: "1"
+          KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+          KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+
+          KAFKA_CREATE_TOPICS: "Data.Raw.Physical:1:16,Data.Raw.Scada:1:16,Data.Error:1:1,Data.Graphs:1:1, Anomaly.Predict:1:1,Anomaly.Alerts:1:1"          
       volumes:
         - "kafka-data:/bitnami"
       networks:
-        - crit_infra_net
+        crit_infra_net:
+          aliases:
+            - cis_kafka
+            - kafka    
     cis_neo4j:
       image: neo4j:4.4.0-enterprise
       container_name: cis_neo4j
@@ -96,9 +188,9 @@ services:
         POSTGRES_DB: "anomalydetection"
       healthcheck:
         test: ["CMD-SHELL", "pg_isready -U postgres -d anomalydetection"]
-        interval: 10s
+        interval: 15s
         timeout: 5s
-        retries: 10
+        retries: 15
       volumes:
         - timescaledb-data:/var/lib/postgresql/data
       networks:
@@ -111,10 +203,10 @@ services:
       ports:
         - "8090:8090"
       depends_on:
-        - cis_kafka
-        - cis_zookeeper        
+        cis_kafka:
+          condition: service_healthy
       environment:
-        KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+        KAFKA_BOOTSTRAP_SERVERS: "cis_kafka:9092"
         KAFKA_PHYS_TOPIC: "Data.Raw.Physical"
         KAFKA_SCADA_TOPIC: "Data.Raw.Scada"
         KAFKA_GENERATE_GRAPH_TOPIC: "Data.Graphs"
@@ -152,11 +244,12 @@ services:
       restart: unless-stopped
       command: python src/data_ingestion/raw_network_consumer.py
       depends_on:
-        - cis_kafka
-        - cis_timescaledb
-        - cis_neo4j
+        cis_kafka:
+          condition: service_healthy            
+        cis_timescaledb:
+          condition: service_healthy
       environment:
-        KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+        KAFKA_BOOTSTRAP_SERVERS: "cis_kafka:9092"
         KAFKA_TOPIC: "Data.Raw.Scada"
         TIMESCALEDB_HOST: "timescaledb"
         TIMESCALEDB_PORT: 5432
@@ -173,11 +266,12 @@ services:
       restart: unless-stopped
       command: python src/data_ingestion/raw_physical_consumer.py
       depends_on:
-        - cis_kafka
-        - cis_timescaledb
-        - cis_neo4j
+        cis_kafka:
+          condition: service_healthy          
+        cis_timescaledb:
+          condition: service_healthy
       environment:
-        KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+        KAFKA_BOOTSTRAP_SERVERS: "cis_kafka:9092"
         KAFKA_TOPIC: "Data.Raw.Physical"
         TIMESCALEDB_HOST: "timescaledb"
         TIMESCALEDB_PORT: 5432
@@ -194,11 +288,12 @@ services:
       restart: unless-stopped
       command: python src/data_ingestion/data_error_consumer.py
       depends_on:
-        - cis_kafka
-        - cis_timescaledb
-        - cis_neo4j
+        cis_kafka:
+          condition: service_healthy          
+        cis_timescaledb:
+          condition: service_healthy
       environment:
-        KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+        KAFKA_BOOTSTRAP_SERVERS: "cis_kafka:9092"
         KAFKA_DATA_ERROR_TOPIC: "Data.Error"
         TIMESCALEDB_HOST: "timescaledb"
         TIMESCALEDB_PORT: 5432
@@ -215,11 +310,12 @@ services:
       restart: unless-stopped
       command: python src/graph_generation/graph_generator_consumer.py
       depends_on:
-        - cis_kafka
-        - cis_timescaledb
-        - cis_neo4j
+        cis_kafka:
+          condition: service_healthy          
+        cis_timescaledb:
+          condition: service_healthy
       environment:
-        KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+        KAFKA_BOOTSTRAP_SERVERS: "cis_kafka:9092"
         KAFKA_TOPIC: "Data.Graphs"
         TIMESCALEDB_HOST: "timescaledb"
         TIMESCALEDB_PORT: 5432
@@ -240,11 +336,12 @@ services:
       restart: unless-stopped
       command: python src/anomaly_detection/anomaly_detection_consumer.py
       depends_on:
-        - cis_kafka
-        - cis_timescaledb
-        - cis_neo4j
+        cis_kafka:
+          condition: service_healthy          
+        cis_timescaledb:
+          condition: service_healthy
       environment:
-        KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+        KAFKA_BOOTSTRAP_SERVERS: "cis_kafka:9092"
         KAFKA_TOPIC: "Data.Graphs"
         TIMESCALEDB_HOST: "timescaledb"
         TIMESCALEDB_PORT: 5432
@@ -265,11 +362,12 @@ services:
       restart: unless-stopped
       command: python src/alerts/alerts_consumer.py
       depends_on:
-        - cis_kafka
-        - cis_timescaledb
-        - cis_neo4j
+        cis_kafka:
+          condition: service_healthy          
+        cis_timescaledb:
+          condition: service_healthy
       environment:
-        KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+        KAFKA_BOOTSTRAP_SERVERS: "cis_kafka:9092"
         KAFKA_TOPIC: "Anomaly.Alerts"
         TIMESCALEDB_HOST: timescaledb
         TIMESCALEDB_PORT: 5432
