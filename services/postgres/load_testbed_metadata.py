@@ -1,5 +1,5 @@
-import psycopg2
-from psycopg2 import sql, connect
+import psycopg
+from psycopg import sql, connect
 import os
 import time
 

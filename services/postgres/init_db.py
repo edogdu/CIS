@@ -1,4 +1,4 @@
-from psycopg2 import sql, connect
+from psycopg import sql, connect
 
 def init_db():
     conn = None
@@ -14,6 +14,7 @@ def init_db():
                             DROP VIEW IF EXISTS scada_resolved_agg_30s CASCADE;
                             DROP TABLE IF EXISTS phys_raw;
                             DROP TABLE IF EXISTS scada_raw;
+                            DROP TABLE IF EXISTS scada_staging;
                             DROP TABLE IF EXISTS phys_measurements_metadata;
                             DROP TABLE IF EXISTS network_endpoints;
                             DROP TABLE IF EXISTS assets;                            
@@ -79,6 +80,25 @@ def init_db():
                             check (destination_port BETWEEN 0 AND 65535 OR destination_port IS NULL),
                             PRIMARY KEY (id, log_ts)
 
+                    );
+                """)
+                cur.execute("""
+                    CREATE UNLOGGED TABLE IF NOT EXISTS scada_staging (
+                        id text NOT NULL, --source_id + source_mac + destination_id + destination_mac + log_ts
+                        system_id TEXT NOT NULL,
+                        log_ts TIMESTAMPTZ NOT NULL,
+                        source_ip INET,
+                        source_port INTEGER,
+                        source_mac MACADDR NULL,
+                        destination_ip INET NULL,
+                        destination_port INTEGER,
+                        destination_mac MACADDR NULL,
+                        protocol TEXT NOT NULL,
+                        modbus_func TEXT NULL,
+                        source_number_packets INTEGER DEFAULT 0,
+                        destination_number_packets INTEGER DEFAULT 0,
+                        total_size INTEGER DEFAULT 0,
+                        attributes JSONB
                     );
                 """)
 

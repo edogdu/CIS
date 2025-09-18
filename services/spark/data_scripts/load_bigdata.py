@@ -7,7 +7,7 @@ from pyspark.sql.functions import (
     col, concat, lit, when, to_timestamp, coalesce, create_map
 )
 
-kafka_bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "cis_kafka:9092")
+kafka_bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "cis-kafka:9092")
 num_partitions = os.getenv("KAFKA_NUM_PARTITIONS", 16)
 phys_data_path = os.getenv("PHYS_DATA_DIR","/data/testbed system_1/Physical")
 network_data_path = os.getenv("SCADA_DATA_DIR","/data/testbed system_1/Network/csv")
@@ -155,8 +155,8 @@ def preprocess_network_data(df):
                          ))
 
 def send_to_kafka(df, topic):
-    print(f"sending to kafka...")
-    df.selectExpr("CAST(log_ts AS STRING) AS key", "to_json(struct(*)) AS value") \
+    print(f"sending to kafka.: {df.take(100)}")
+    df.selectExpr("CAST(id AS STRING) AS key", "to_json(struct(*)) AS value") \
     .write \
     .format("kafka") \
     .option("kafka.bootstrap.servers", kafka_bootstrap_servers) \
