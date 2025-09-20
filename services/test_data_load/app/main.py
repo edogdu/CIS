@@ -7,6 +7,7 @@ import os
 from schemas.PhysicalLog import PhysicalLog
 from schemas.ScadaLog import ScadaLog
 from schemas.GenerateGraphRequest import GenerateGraphRequest
+from psycopg import sql, connect
 
 app = FastAPI()
 kafka_bootstrap_servers = os.getenv('KAFKA_BOOTSTRAP_SERVERS','kafka:9092')
@@ -97,3 +98,9 @@ async  def generate_graph(request: GenerateGraphRequest):
     await producer.stop()
     return {"message": "Graph generation request sent"}
     
+@app.get("/export_aggregate_data")
+async def export_aggregate_data():
+    with connect() as conn:            
+        query = "SELECT * FROM scada_resolved_agg_30s ORDER BY bucket;"
+        df = pd.read_sql_query(query, conn)
+        df.to_csv(f"{data_dir}/testbed_system_1/aggregated.csv",index=False)

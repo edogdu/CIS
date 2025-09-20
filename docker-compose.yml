@@ -206,6 +206,12 @@ services:
         cis-kafka:
           condition: service_healthy
       environment:
+        PGHOST: timescaledb
+        PGPORT: 5432
+        PGUSER: "postgres"
+        PGPASSWORD: "password"
+        PGDATABASE: "anomalydetection"
+        PGSSLMODE: "disable"
         KAFKA_BOOTSTRAP_SERVERS: "cis-kafka:9092"
         KAFKA_PHYS_TOPIC: "Data.Raw.Physical"
         KAFKA_SCADA_TOPIC: "Data.Raw.Scada"
