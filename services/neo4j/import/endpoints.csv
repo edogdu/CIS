@@ -1,0 +1,8 @@
+endpoint_id,system_id,ip,mac,asset_id,first_seen_ts,last_seen_ts,validated
+testbed_system_1_PLC_PLC_1_84.3.251.18/17,testbed_system_1,84.3.251.18/17,,testbed_system_1_PLC_PLC_1,2025-09-18 22:18:25.472132+00:00,2025-09-18 22:18:25.472132+00:00,True
+testbed_system_1_PLC_PLC_2_84.3.251.101/17,testbed_system_1,84.3.251.101/17,,testbed_system_1_PLC_PLC_2,2025-09-18 22:18:25.475768+00:00,2025-09-18 22:18:25.475768+00:00,True
+testbed_system_1_PLC_PLC_3_84.3.251.102/17,testbed_system_1,84.3.251.102/17,,testbed_system_1_PLC_PLC_3,2025-09-18 22:18:25.478631+00:00,2025-09-18 22:18:25.478631+00:00,True
+testbed_system_1_PLC_PLC_4_84.3.251.103/17,testbed_system_1,84.3.251.103/17,,testbed_system_1_PLC_PLC_4,2025-09-18 22:18:25.481126+00:00,2025-09-18 22:18:25.481126+00:00,True
+testbed_system_1_HMI_HMI_1_84.3.251.20/17,testbed_system_1,84.3.251.20/17,,testbed_system_1_HMI_HMI_1,2025-09-18 22:18:25.483445+00:00,2025-09-18 22:18:25.483445+00:00,True
+testbed_system_1_Flow Sensor_Flow_sensor_1_84.3.251.104/17,testbed_system_1,84.3.251.104/17,,testbed_system_1_Flow Sensor_Flow_sensor_1,2025-09-18 22:18:25.486034+00:00,2025-09-18 22:18:25.486034+00:00,True
+testbed_system_1_Flow Sensor_Flow_sensor_2_84.3.251.105/17,testbed_system_1,84.3.251.105/17,,testbed_system_1_Flow Sensor_Flow_sensor_2,2025-09-18 22:18:25.488002+00:00,2025-09-18 22:18:25.488002+00:00,True

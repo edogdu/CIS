@@ -9,7 +9,7 @@ __pycache__/
 # Ignore VSCode folders
 .vscode/
 .idea/
-*.csv
+data/**/*.csv
 *.pcap
 .env
 .env.*
