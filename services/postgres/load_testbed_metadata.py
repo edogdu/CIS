@@ -8,7 +8,7 @@ def load_testbed_metadata():
     system_id = "testbed_system_1"
     network_assets = [{
             "asset_type": "PLC",
-            "asset_name": "PLC-1",
+            "asset_name": "PLC_1",
             "ip": "84.3.251.18/17"
         },{
             "asset_type": "PLC",
@@ -27,12 +27,12 @@ def load_testbed_metadata():
             "asset_name": "HMI_1",
             "ip": "84.3.251.20/17"
         },{
-            "asset_type": "Field Instrument Controller",
-            "asset_name": "FIC_1",
+            "asset_type": "Flow Sensor",
+            "asset_name": "Flow_sensor_1",
             "ip": "84.3.251.104/17"
         },{
-            "asset_type": "Field Instrument Controller",
-            "asset_name": "FIC_2",
+            "asset_type": "Flow Sensor",
+            "asset_name": "Flow_sensor_2",
             "ip": "84.3.251.105/17"
         }] # List of tuples (asset_id, system_id, asset_type, asset_name)
     

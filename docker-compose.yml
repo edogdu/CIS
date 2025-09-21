@@ -37,6 +37,8 @@ services:
       environment:
         SPARK_MODE: "worker"
         SPARK_MASTER_URL: "spark://cis-spark-master:7077"
+
+        #TODO: Change as necessary depending on host machine available resources
         SPARK_WORKER_MEMORY: "16G"
         SPARK_WORKER_CORES: "8"
       ports:
@@ -93,6 +95,7 @@ services:
         - "spark.executor.extraJavaOptions=-Duser.name=spark -Duser.home=/tmp"
         - "--conf"
         - "spark.jars.ivy=/tmp/.ivy2"
+        #TODO: Change as necessary depending on host machine available resources
         - "--conf"
         - "spark.executor.instances=2"
         - "--conf"
@@ -129,6 +132,7 @@ services:
           KAFKA_CFG_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
           KAFKA_CFG_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
 
+          #TODO: Change as necessary depending on host machine available resources
           KAFKA_HEAP_OPTIONS: "-Xms6g -Xmx6g"
           KAFKA_CFG_NUM_NETWORK_THREADS: "6"
           KAFKA_CFG_NUM_IO_THREADS: "16"
@@ -153,7 +157,7 @@ services:
       image: neo4j:4.4.0-enterprise
       container_name: cis-neo4j
       hostname: cis-neo4j
-      restart: always
+      restart: unless-stopped
       ports:
         - "7485:7485"
         - "7698:7698"
@@ -164,15 +168,19 @@ services:
         NEO4J_ACCEPT_LICENSE_AGREEMENT: 'yes' # Required if using Enterprise version
         NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
         NEO4J_apoc_import_file_enabled: "true"
+        NEO4J_apoc_import_file_use_neo4j_config: "true"
+        NEO4J_dbms_security_allow_csv_import_from_file_urls: "true"
         NEO4J_apoc_initializer_cypher: "CALL apoc.cypher.runFiles(['file:///init.cypher'])"
         NEO4J_dbms_jvm_additional: "-XX:-UseContainerSupport"
         NEO4J_dbms_connector_http_listen__address: ":7485"
         NEO4J_dbms_connector_bolt_listen__address: ":7698"
         NEO4J_dbms_connector_http_advertised_address: "localhost:7485"
         NEO4J_dbms_connector_bolt_advertised_address: "localhost:7698"
+        NEO4J_apoc_jdbc_postgres_url: >
+          jdbc:postgresql://timescaledb:5432/?user=&password=password&sslmode=disable
       volumes:
         - neo4j-data:/data        
-        - ./services/neo4j/import:/var/lib/neo4j/import # Mount the import directory for initial cypher scripts
+        - ./services/neo4j/import:/var/lib/neo4j/import # Mount the import directory for initial cypher scripts        
       networks:
         - crit_infra_net
     cis-timescaledb:

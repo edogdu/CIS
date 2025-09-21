@@ -35,6 +35,37 @@ $  docker-compose down
   * **Postgres**
     * 5445
 
+## Notes about Configuring Spark and Kafka
+Depending on the hosting machine's available resources, the following services in docker-compose.yml may need to be adjusted accordingly.
+* Spark - https://spark.apache.org/docs/latest/hardware-provisioning.html
+* Kafka - https://docs.redhat.com/en/documentation/red_hat_streams_for_apache_kafka/2.9/html/kafka_configuration_tuning/con-broker-config-properties-str#improving_request_handling_throughput_by_increasing_i_o_threads
+
+```yaml
+cis-spark-worker:
+	SPARK_WORKER_MEMORY: "16G"
+	SPARK_WORKER_CORES: "8"
+	
+cis-load-bigdata:
+	entrypoint:
+    - "spark.executor.instances=2"
+    - "--conf"
+    - "spark.executor.memory=8g"
+    - "--conf"
+    - "spark.executor.cores=4"
+    - "--conf"
+    - "spark.driver.memory=8g"
+
+cis-kafka:
+	environment:  
+		KAFKA_HEAP_OPTIONS: "-Xms6g -Xmx6g"
+		KAFKA_CFG_NUM_NETWORK_THREADS: "6"
+		KAFKA_CFG_NUM_IO_THREADS: "16"
+		KAFKA_CFG_SOCKET_SEND_BUFFER_BYTES: "1048576"
+		KAFKA_CFG_MESSAGE_MAX_BYTES: "2000000"
+		KAFKA_CFG_REPLICA_SOCKET_RECEIVE_BUFFER_BYTES: "1048576"
+
+```
+
 ## Resources
 * testbed_system_1 assumes that you have downloaded A hardware-in-the-loop water distribution testbed (WDT) dataset for cyber-physical security testing dataset from IEEE Dataport. See /data/testbed_system_1/CITATIONS.md for more information.
 * Docker has a tendency to have hanging resources that can take up alot of diskspace, I found the following commands useful

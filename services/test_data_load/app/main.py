@@ -104,3 +104,18 @@ async def export_aggregate_data():
         query = "SELECT * FROM scada_resolved_agg_30s ORDER BY bucket;"
         df = pd.read_sql_query(query, conn)
         df.to_csv(f"{data_dir}/testbed_system_1/aggregated.csv",index=False)
+
+@app.get("/export_sys_config")
+async def export_sys_config():
+    with connect() as conn:            
+        q1 = "SELECT * FROM assets"
+        q2 = "SELECT * FROM network_endpoints"
+        q3 = "SELECT * FROM phys_measurements_metadata"
+        df = pd.read_sql_query(q1, conn)
+        df.to_csv(f"{data_dir}/testbed_system_1/assets.csv",index=False)
+
+        df = pd.read_sql_query(q2, conn)
+        df.to_csv(f"{data_dir}/testbed_system_1/endpoints.csv",index=False)
+
+        df = pd.read_sql_query(q3, conn)
+        df.to_csv(f"{data_dir}/testbed_system_1/measurement_types.csv",index=False)
