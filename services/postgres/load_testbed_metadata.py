@@ -9,31 +9,38 @@ def load_testbed_metadata():
     network_assets = [{
             "asset_type": "PLC",
             "asset_name": "PLC_1",
-            "ip": "84.3.251.18/17"
+            "ip": "84.3.251.18",
+            "cidr": 17           
         },{
             "asset_type": "PLC",
             "asset_name": "PLC_2",
-            "ip": "84.3.251.101/17"
+            "ip": "84.3.251.101",
+            "cidr": 17
         },{
             "asset_type": "PLC",
             "asset_name": "PLC_3",
-            "ip": "84.3.251.102/17"
+            "ip": "84.3.251.102",
+            "cidr": 17
         },{
             "asset_type": "PLC",
             "asset_name": "PLC_4",
-            "ip": "84.3.251.103/17"
+            "ip": "84.3.251.103",
+            "cidr": 17
         },{
             "asset_type": "HMI",
             "asset_name": "HMI_1",
-            "ip": "84.3.251.20/17"
+            "ip": "84.3.251.20",
+            "cidr": 17
         },{
             "asset_type": "Flow Sensor",
             "asset_name": "Flow_sensor_1",
-            "ip": "84.3.251.104/17"
+            "ip": "84.3.251.104",
+            "cidr": 17
         },{
             "asset_type": "Flow Sensor",
             "asset_name": "Flow_sensor_2",
-            "ip": "84.3.251.105/17"
+            "ip": "84.3.251.105",
+            "cidr": 17
         }] # List of tuples (asset_id, system_id, asset_type, asset_name)
     
     physical_assets = []
@@ -90,11 +97,11 @@ def load_testbed_metadata():
                         SET last_seen_ts = now(), validated = TRUE
                     """, (asset_id, system_id, asset['asset_type'], asset['asset_name']))
                     cur.execute("""
-                        INSERT INTO network_endpoints (endpoint_id, system_id, ip, asset_id, validated)
-                        VALUES (%s, %s, %s, %s, TRUE)
+                        INSERT INTO network_endpoints (endpoint_id, system_id, ip, cidr, asset_id, validated)
+                        VALUES (%s, %s, %s, %s, %s, TRUE)
                         ON CONFLICT (endpoint_id) DO UPDATE 
                         SET last_seen_ts = now(), validated = TRUE
-                    """, (f"{asset_id}_{asset['ip']}", system_id, asset['ip'], asset_id))
+                    """, (f"{asset_id}_{asset['ip']}", system_id, asset['ip'], asset['cidr'], asset_id))
 
                 for asset in physical_assets:
                     asset_id = f"{system_id}_{asset['asset_type']}_{asset['asset_name']}"

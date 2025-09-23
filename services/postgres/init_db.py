@@ -36,8 +36,9 @@ def init_db():
                     CREATE TABLE IF NOT EXISTS network_endpoints (
                         endpoint_id text PRIMARY KEY, -- asset_id + ip + mac  
                         system_id TEXT NOT NULL,                      
-                        ip INET NULL,            
-                        mac MACADDR NULL,
+                        ip INET NULL,     
+                        cidr SMALLINT NULL,       
+                        mac MACADDR NULL,                        
                         asset_id TEXT NOT NULL REFERENCES ASSETS(asset_id) ON DELETE CASCADE,
                         first_seen_ts TIMESTAMPTZ NOT NULL DEFAULT now(),
                         last_seen_ts TIMESTAMPTZ NOT NULL DEFAULT now(),

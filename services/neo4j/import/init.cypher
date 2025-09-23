@@ -88,7 +88,7 @@ FOREACH (_ IN CASE WHEN t CONTAINS 'flow sensor' THEN [1] ELSE [] END | SET a:Fl
 LOAD CSV WITH HEADERS FROM 'file:///endpoints.csv' AS row
 WITH row WHERE row.system_id='testbed_system_1' AND row.ip IS NOT NULL AND row.ip <> ''
 MERGE (a:Asset {asset_id: row.asset_id})
-MERGE (e:Endpoint {ip: row.ip})
+MERGE (e:Endpoint {ip: row.ip, key: row.ip})
   ON CREATE SET e.cidr = CASE WHEN row.ip CONTAINS '/' THEN toInteger(split(row.ip,'/')[1]) ELSE null END
 MERGE (a)-[:HAS_ENDPOINT]->(e);
 

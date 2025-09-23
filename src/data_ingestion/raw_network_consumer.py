@@ -1,10 +1,9 @@
-import asyncio, os, signal, json, logging
+import asyncio, os, signal, json, logging, orjson
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from schemas.ScadaLog import ScadaLog
-import orjson
 from psycopg_pool import AsyncConnectionPool
 from pydantic import ValidationError
-from datetime import datetime
+
 
 schema_dir = os.getenv('SCHEMA_DIR','/app/schemas')
 logging.basicConfig(level=logging.INFO

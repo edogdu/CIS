@@ -1,0 +1,26 @@
+# Web Frameworks and API
+fastapi
+uvicorn
+
+# Data Processing and Kafka
+aiokafka
+pandas
+scikit-learn
+Pydantic
+# Databases and Drivers
+psycopg[binary,pool]>=3.2
+neo4j
+orjson
+# Machine Learning and GNN
+#torch
+#torch-geometric
+#joblib
+
+# Explainable AI (XAI)
+#shap
+#lime
+# Torch Geometric Explainer is integrated into torch-geometric
+
+
+# Other utilities
+python-dotenv

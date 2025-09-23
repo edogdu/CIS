@@ -330,10 +330,10 @@ services:
       volumes:
         - ./Logs/kafka:/app/logs
     cis-graph-generator-consumer:
-      build: .
+      build: ./src/knowledge_graphs
       container_name: cis-graph-generator-consumer
       restart: unless-stopped
-      command: python src/graph_generation/graph_generator_consumer.py
+      command: python graph_generator_consumer.py
       depends_on:
         cis-kafka:
           condition: service_healthy          
@@ -342,19 +342,19 @@ services:
       environment:
         KAFKA_BOOTSTRAP_SERVERS: "cis-kafka:9092"
         KAFKA_TOPIC: "Data.Graphs"
-        TIMESCALEDB_HOST: "timescaledb"
-        TIMESCALEDB_PORT: 5432
-        TIMESCALEDB_DB: "anomalydetection"
-        TIMESCALEDB_USER: "postgres"
-        TIMESCALEDB_PASSWORD: "password"
-        NEO4J_HOST: "cis-neo4j"
-        NEO4J_PORT: 7687
+        PG_DSN: "postgresql://postgres:password@timescaledb:5432/anomalydetection?sslmode=disable"
+        PG_MIN_SIZE: 1
+        PG_MAX_SIZE: 5
+        NEO4J_URI: "bolt://cis-neo4j:7698"
         NEO4J_USER: "neo4j"
-        NEO4J_PASSWORD: "gr@ph$Rfun!"
+        NEO4J_PASSWORD: "changeme"
       networks:
         - crit_infra_net
       volumes:
         - ./Logs/kafka:/app/logs
+        - ./schemas:/app/schemas
+        - ./src/factories:/app/factories
+        - ./src/repositories:/app/repositories
     cis-anomaly-detector-consumer:
       build: .
       container_name: cis-anomaly-detector-consumer
