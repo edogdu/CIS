@@ -35,8 +35,9 @@ class SystemRepository:
                 MERGE (e:Endpoint {key: $key})
                 ON CREATE SET e.cidr = CASE WHEN e.ip CONTAINS '/' THEN toInteger(split(e.ip,'/')[1]) ELSE null END,
                     e.ip = $ip,
-                    e.mac = $mac                    
-                ON MATCH SET e.mac = COALESCE(e.mac, $mac)
+                    e.mac = $mac,
+                    e.system_id = $system_id
+                ON MATCH SET e.mac = COALESCE(e.mac, $mac), e.system_id = $system_id
                 MERGE (a)-[:HAS_ENDPOINT]->(e)
                 """,
                 asset_id=asset_id,

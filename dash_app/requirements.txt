@@ -1,7 +1,0 @@
-dash
-pandas
-plotly
-python-dotenv
-dash-bootstrap-components
-flask
-requests

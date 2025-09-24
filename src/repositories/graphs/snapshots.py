@@ -76,13 +76,16 @@ class SnapshotRepository:
                         destination_total_packets: $destination_total_packets,
                         min_size: $min_size,
                         max_size: $max_size,
-                        num_connections: $num_connections
+                        num_connections: $num_connections,
+                        source: $source_key,
+                        destination: $destination_key,
+                        snapshot_id: $snapshot_id
                     })
                     ON CREATE SET conn.source_port = $source_port,
-                        conn.destination_port = $destination_port
+                        conn.destination_port = $destination_port,
+                        conn.system_id = src.system_id
                     MERGE (src)-[:INITIATES]->(conn)
                     MERGE (conn)-[:TERMINATES_AT]->(dst)
-                    MERGE (s)-[:INCLUDES_CONNECTION]->(conn)
                     """,
                     snapshot_id=snapshot_id,
                     source_ip=(record.source_ip or None),
