@@ -81,7 +81,7 @@ FOREACH (_ IN CASE WHEN t CONTAINS 'plc' THEN [1] ELSE [] END | SET a:PLC)
 FOREACH (_ IN CASE WHEN t CONTAINS 'hmi' THEN [1] ELSE [] END | SET a:HMI)
 FOREACH (_ IN CASE WHEN t CONTAINS 'tank' THEN [1] ELSE [] END | SET a:Tank)
 FOREACH (_ IN CASE WHEN t CONTAINS 'pump' THEN [1] ELSE [] END | SET a:Pump)
-FOREACH (_ IN CASE WHEN t CONTAINS 'valve' THEN [1] ELSE [] END | SET a:Valve)
+FOREACH (_ IN CASE WHEN t CONTAINS 'valv' THEN [1] ELSE [] END | SET a:Valve)
 FOREACH (_ IN CASE WHEN t CONTAINS 'flow sensor' THEN [1] ELSE [] END | SET a:FlowSensor);
 
 // -------- ENDPOINTS (endpoints.csv) --------

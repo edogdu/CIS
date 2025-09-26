@@ -6,8 +6,7 @@ from psycopg.rows import class_row, dict_row
 
 class AggregateRepository:
 
-    async def fetch_physical_aggregates(start_time, end_time, system_id) -> list[PhysicalAggregate]:
-        return []
+    async def fetch_physical_aggregates(start_time, end_time, system_id) -> list[PhysicalAggregate]:        
         pool = await DataFactory.get_pg_pool()
         query = """
         SELECT 
@@ -20,7 +19,7 @@ class AggregateRepository:
             min_value,
             max_value,
             num_measurements
-        FROM physical_resolved_agg_30s
+        FROM phys_agg_30s
         WHERE bucket >= %s AND bucket < %s AND system_id = %s
         ORDER BY bucket;
         """

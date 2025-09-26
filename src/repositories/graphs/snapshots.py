@@ -2,7 +2,7 @@ from factories.data import DataFactory
 from schemas.GenerateGraphRequest import GenerateGraphRequest
 from schemas.ScadaAggregate import ScadaAggregate
 from schemas.PhysicalAggregate import PhysicalAggregate
-
+import datetime
 class SnapshotRepository:
         
     async def create_snapshot(request: GenerateGraphRequest, bucket) -> str:
@@ -19,8 +19,8 @@ class SnapshotRepository:
                 """,
                 snapshot_id=snapshot_id,
                 system_id=request.system_id,
-                start_time=bucket.isoformat(),
-                end_time=bucket.isoformat() + " + duration '30 seconds'"
+                start_time=bucket,
+                end_time=bucket + datetime.timedelta(seconds=30)
             )
             return snapshot_id
 
@@ -29,29 +29,26 @@ class SnapshotRepository:
         async with neo4j.session() as session:
             for record in physical_data:
                 await session.run(
-                    """
-                    MATCH (s:Snapshot {id: $snapshot_id})
-                    MATCH (a:Asset {id: $asset_id})
-                    MERGE (p:Property {key: $prop_key})
+                    """                    
+                    MATCH (a:Asset {asset_id: $asset_id})
                     MERGE (m:Measurement {
                         start_time: datetime($bucket),
                         system_id: a.system_id,
                         asset_id: a.asset_id,
                         snapshot_id: $snapshot_id,
                         measurement_type: $prop_key,
-                        duration: $duration,
-                        avg_value: $avg_value,
-                        min_value: $min_value,
-                        max_value: $max_value,
-                        num_measurements: $num_measurements
+                        duration: $duration                        
                     })
+                    ON CREATE SET m.avg_value = $avg_value,
+                        m.min_value = $min_value,
+                        m.max_value = $max_value,
+                        m.num_measurements = $num_measurements
                     MERGE (a)-[:HAS_MEASUREMENT]->(m)
-                    MERGE (s)-[:INCLUDES_MEASUREMENT]->(m)
                     """,
                     snapshot_id=snapshot_id,
                     asset_id=record.asset_id,
                     prop_key=record.prop_key,
-                    bucket=record.bucket.isoformat(),
+                    bucket=record.bucket,
                     duration=record.duration,
                     avg_value=record.avg_value,
                     min_value=record.min_value,
@@ -92,7 +89,7 @@ class SnapshotRepository:
                     source_mac=(record.source_mac or None),
                     destination_ip=(record.destination_ip or None),
                     destination_mac=(record.destination_mac or None),
-                    bucket=record.bucket.isoformat(),
+                    bucket=record.bucket,
                     duration=record.duration,
                     protocol=record.protocol,
                     avg_size=record.avg_size,

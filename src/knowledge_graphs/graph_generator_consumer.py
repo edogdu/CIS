@@ -49,9 +49,11 @@ async def consume_generate_graph_request():
             log.info(f"Total unique time buckets to process: {len(buckets)}")
 
             for bucket in buckets:
-                log.info(f"Processing bucket: {bucket.isoformat()}")
+                log.info(f"Processing bucket: {bucket}")
                 bucket_scada_records = [record for record in scada_records if record.bucket == bucket]
                 bucket_physical_records = [record for record in physical_records if record.bucket == bucket]
+                print(f"Bucket {bucket} has {len(bucket_scada_records)} SCADA records and {len(bucket_physical_records)} physical records")
+                log.info(f"Bucket {bucket} has {len(bucket_scada_records)} SCADA records and {len(bucket_physical_records)} physical records")
                 snapshot_id = await SnapshotRepository.create_snapshot(request, bucket)
                 for record in bucket_scada_records:
                     log.debug(f"SCADA Record: {record.model_dump_json()}")
@@ -86,10 +88,11 @@ async def consume_generate_graph_request():
                             key=record.destination_key,
                             asset_id=destination_external_ids[1]
                         )
-                if bucket_scada_records and len(bucket_scada_records) > 0:
-                    await SnapshotRepository.add_scada_data_to_snapshot(snapshot_id, bucket_scada_records)
+
                 if bucket_physical_records and len(bucket_physical_records) > 0:
                     await SnapshotRepository.add_physical_data_to_snapshot(snapshot_id, bucket_physical_records)
+                if bucket_scada_records and len(bucket_scada_records) > 0:
+                    await SnapshotRepository.add_scada_data_to_snapshot(snapshot_id, bucket_scada_records)
 
     finally:
         await consumer.stop()

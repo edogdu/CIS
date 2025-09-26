@@ -60,25 +60,25 @@ def load_testbed_metadata():
         "asset_type": "Pump",
         "asset_name": f"Pump_{i}",
         "measurements": [{
-            "name": "state",
+            "name": "State",
             "prop_key": "state"
         }]
         })
     for i in range(1, 5):
         physical_assets.append({
-        "asset_type": "Flow Sensor",
+        "asset_type": "Flow_sensor",
         "asset_name": f"Flow_sensor_{i}",
         "measurements": [{
-            "name": "Flow Sensor Value",
+            "name": "Value",
             "prop_key": "value"
         }]
         })
     for i in range(1, 23):
         physical_assets.append({
-        "asset_type": "Valve",
-        "asset_name": f"Valve_{i}",
+        "asset_type": "Valv",
+        "asset_name": f"Valv_{i}",
         "measurements": [{
-            "name": "state",
+            "name": "State",
             "prop_key": "state"
         }]
         })   

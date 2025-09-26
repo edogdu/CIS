@@ -75,6 +75,8 @@ services:
         KAFKA_BOOTSTRAP_SERVERS: "cis-kafka:9092"
         KAFKA_PHYS_TOPIC: "Data.Raw.Physical"
         KAFKA_SCADA_TOPIC: "Data.Raw.Scada"
+        PHYS_UTF16_DATA_DIR: "/data/testbed_system_1/Physical/utf16"
+        PHYS_UTF16_DATA_DEST_DIR: "/data/testbed_system_1/Physical"
         PHYS_DATA_DIR: "file:///data/testbed_system_1/Physical"
         SCADA_DATA_DIR: "file:///data/testbed_system_1/Network/csv"
       entrypoint: 
@@ -275,10 +277,10 @@ services:
         - ./Logs/kafka:/app/logs
         - ./schemas:/app/schemas
     cis-raw-physical-consumer:
-      build: .
+      build: ./src/data_ingestion
       container_name: cis-raw-physical-consumer
       restart: unless-stopped
-      command: python src/data_ingestion/raw_physical_consumer.py
+      command: python raw_physical_consumer.py
       depends_on:
         cis-kafka:
           condition: service_healthy          
@@ -287,11 +289,14 @@ services:
       environment:
         KAFKA_BOOTSTRAP_SERVERS: "cis-kafka:9092"
         KAFKA_TOPIC: "Data.Raw.Physical"
-        TIMESCALEDB_HOST: "timescaledb"
-        TIMESCALEDB_PORT: 5432
-        TIMESCALEDB_DB: "anomalydetection"
-        TIMESCALEDB_USER: "postgres"
-        TIMESCALEDB_PASSWORD: "password"
+        PG_DSN: "postgresql://postgres:password@timescaledb:5432/anomalydetection?sslmode=disable"
+        PGHOST: timescaledb
+        PGPORT: 5432
+        PGUSER: "postgres"
+        PGPASSWORD: "password"
+        PGDATABASE: "anomalydetection"
+        PGSSLMODE: "disable"
+        PG_TABLE: "phys_raw"
       networks:
         - crit_infra_net
       volumes:

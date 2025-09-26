@@ -1,15 +1,18 @@
-import os
+import os, glob
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
     StructType, StructField, StringType, IntegerType, DoubleType, TimestampType, BooleanType
 )
 from pyspark.sql.functions import (
-    col, concat, lit, when, to_timestamp, coalesce, create_map
+    col, concat, lit, when, to_timestamp, coalesce, create_map, date_format, trim
+    , regexp_replace, split, element_at
 )
 
 kafka_bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "cis-kafka:9092")
 num_partitions = os.getenv("KAFKA_NUM_PARTITIONS", 16)
 phys_data_path = os.getenv("PHYS_DATA_DIR","/data/testbed system_1/Physical")
+phys_utf16_data_path = os.getenv("PHYS_UTF16_DATA_DIR","/data/testbed system_1/Physical/utf16")
+phys_utf16_data_dest_path = os.getenv("PHYS_UTF16_DATA_DEST_DIR","/data/testbed system_1/Physical")
 network_data_path = os.getenv("SCADA_DATA_DIR","/data/testbed system_1/Network/csv")
 system_id = "testbed_system_1"
 network_topic = os.getenv("KAFKA_SCADA_TOPIC","Data.Raw.Scada")
@@ -90,7 +93,7 @@ def preprocess_phys_data(df):
                    ,"Valv_7","Valv_8","Valv_9","Valv_10","Valv_11","Valv_12"
                    ,"Valv_13","Valv_14","Valv_15","Valv_16","Valv_17","Valv_18"
                    ,"Valv_19","Valv_20","Valv_21","Valv_22"]
-    
+        
     all_cols = double_cols + bool_cols
     df2 = df.select("Time", "Label_n", "Label",
                     *[col(c).cast("double").alias(c) for c in double_cols],
@@ -99,13 +102,38 @@ def preprocess_phys_data(df):
                       .otherwise(lit(None).cast("double")).alias(c) for c in bool_cols])
     
     pairs = ", ".join([f"'{c}',`{c}`" for c in all_cols])
+    measure_types =  {"Tank": "Pressure", "Pump": "state", "Flow_sensor": "Value", "Valv": "state"}
+    asset_type = split(col("measurement_id"), "_").getItem(0)
+
     unpivot_df = df2.selectExpr(
         "Time",
         "Label_n",
         "Label",
-        f"stack({len(all_cols)}, {pairs}) as (measurement_id, measurement_value)"
+        f"stack({len(all_cols)}, {pairs}) as (measurement_id, measure_value)"
     )
-    return unpivot_df.withColumn(lit("log_ts"), to_timestamp(col("Time"))).withColumn(lit("measurement_id"),col("measurement_value").cast("double")).withColumn("attributes", create_map(lit("Label_n"), col("Label_n"), lit("Label"), col("Label")))
+    
+    
+    #testbed_system_1_Tank_Tank_1_Pressure
+    return unpivot_df.withColumn("id", concat(lit(f"{system_id}_"), date_format(to_timestamp(regexp_replace(trim(col("Time")),"^\uffef",""), "dd/MM/yyyy HH:mm:ss"), "yyyy-MM-dd'T'HH:mm:ss.SSSSSS"), lit("_"), col("measurement_id"))
+                                 ).withColumn("system_id", lit(system_id)
+                                 ).withColumn("log_ts", date_format(to_timestamp(regexp_replace(trim(col("Time")),"^\uffef",""), "dd/MM/yyyy HH:mm:ss"), "yyyy-MM-dd'T'HH:mm:ss.SSSSSS")
+                                 ).withColumn("measurement_id", concat(lit(f"{system_id}_")
+                                                                       ,when(asset_type == "Flow", lit("Flow_sensor"))
+                                                                          .otherwise(asset_type)
+                                                                       , lit("_")
+                                                                       , col("measurement_id")
+                                                                       , lit("_")
+                                                                       , when(asset_type == "Tank", lit("Pressure"))
+                                                                        .when(asset_type == "Pump", lit("State"))
+                                                                        .when(asset_type == "Flow", lit("Value"))
+                                                                        .when(asset_type == "Valv", lit("State"))
+                                                                        .otherwise(lit("unknown"))
+                                                                       )
+                                 ).withColumn("measure_value", col("measure_value").cast("double")
+                                 ).withColumn("attributes", create_map(lit("Label_n"), col("Label_n"), lit("Label"), col("Label"))
+                                 ).drop("Label_n").drop("Label").drop("Time")
+
+
 
 def preprocess_network_data(df):
     print("processing network data...")
@@ -123,7 +151,7 @@ def preprocess_network_data(df):
             ).withColumn("system_id"
                          , lit(system_id)    
             ).withColumn("log_ts"
-                         , to_timestamp(col("Time"))
+                         , date_format(to_timestamp(col("Time")), "yyyy-MM-dd'T'HH:mm:ss.SSSSSS")
             ).withColumn("source_ip"
                          , col("ip_s")
             ).withColumn("source_port"
@@ -164,6 +192,23 @@ def send_to_kafka(df, topic):
     .save()
     print("complete...")
 
+def convert_phys_utf16_to_utf8():
+    print("converting to utf-8...")
+    path = f"{phys_utf16_data_path}/*.csv"
+    print(f"looking for files in path: {path}")
+    files = glob.glob(path)
+    print(f"found {len(files)} files to convert...")
+    for filename in files:        
+        print(f"processing file: {filename}")
+        src = f"{phys_utf16_data_path}/{os.path.basename(filename)}"
+        dest = f"{phys_utf16_data_dest_path}/{os.path.basename(filename)}"
+        with open(src, "r", encoding="utf-16") as fsrc:
+            with open(dest, "w", encoding="utf-8") as fdest:
+                print(f"writing to file: {dest}")
+                for line in fsrc:
+                    fdest.write(line)
+        
+
 if __name__ == "__main__":
     spark = SparkSession.builder.appName("CISBulkDataLoader").getOrCreate()
     try:
@@ -174,15 +219,18 @@ if __name__ == "__main__":
                                     ,nullValue="NaN")
         final_network_df = preprocess_network_data(network_df)
         send_to_kafka(final_network_df, network_topic)
+        print("Network data load complete.")
 
         #physical
         # TODO: Need to fix mapping before uncommenting and loading physical data
-        # phys_df = spark.read.csv(f"{phys_data_path}/*.csv"
-        #                             ,header=True
-        #                             ,schema=phys_data_schema
-        #                             ,nullValue="NaN")
-        # final_phys_df = preprocess_phys_data(phys_df)
-        # send_to_kafka(final_phys_df, phys_topic)
+        convert_phys_utf16_to_utf8()
         
+        phys_df_utf8 = spark.read.options(delimiter="\t", header=True, schema=phys_data_schema, nullValue="NaN", encoding="UTF-8").csv(f"{phys_data_path}/phy_*.csv")
+        final_utf8phys_df = preprocess_phys_data(phys_df_utf8)
+        #print(f"final_utf8phys_df: {final_utf8phys_df.take(100)}")
+        send_to_kafka(final_utf8phys_df, phys_topic)
+        print("Physical data load complete.")
     finally:
         spark.stop()
+        print("Spark session stopped.")
+        print("Data load process complete.")

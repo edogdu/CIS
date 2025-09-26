@@ -119,3 +119,9 @@ async def export_sys_config():
 
         df = pd.read_sql_query(q3, conn)
         df.to_csv(f"{data_dir}/testbed_system_1/measurement_types.csv",index=False)
+
+# TODO: Add endpoint for these queries
+# CALL refresh_continuous_aggregate('phys_agg_30s', NULL, NULL);
+# CALL refresh_continuous_aggregate('scada_agg_30s', NULL, NULL);
+
+# REFRESH MATERIALIZED VIEW scada_resolved_agg_30s;
