@@ -19,3 +19,4 @@ data/**/*.csv
 .venv/
 !.gitkeep
 *.log
+ragAnythingSecrets.json
