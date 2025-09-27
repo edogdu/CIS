@@ -11,6 +11,10 @@ volumes:
     driver: local
   spark-data:
     driver: local
+  rag-anything-data:
+    driver: local
+  ollama-data:
+    driver: local
 networks:
   crit_infra_net:
     driver: bridge
@@ -109,8 +113,44 @@ services:
         - "--packages"
         - "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1"
         - "/data_scripts/load_bigdata.py"
-
-
+    cis-ollama:
+      image: ollama/ollama:latest
+      container_name: cis-ollama
+      deploy:
+        resources:
+          reservations:
+            devices:
+              - driver: nvidia
+                count: all
+                capabilities: [gpu]
+      restart: unless-stopped
+      healthcheck:
+        test: ["CMD", "ollama", "list"]
+        interval: 15s
+        timeout: 10s
+        retries: 10
+      ports:
+        - "11434:11434"
+      volumes:
+        - ollama-data:/var/lib/ollama
+      networks:
+        - crit_infra_net
+    cis-ollama-pull-models:
+      image: ollama/ollama:latest
+      container_name: cis-ollama-pull-models
+      restart: "no"
+      depends_on:
+        cis-ollama:
+          condition: service_healthy
+      environment:
+        OLLAMA_HOST: http://cis-ollama:11434
+      networks:
+        - crit_infra_net  
+      entrypoint: 
+        # Pull models on startup, change as necessary
+        - "/bin/sh"
+        - "-lc"
+        - "ollama pull llama3.1:8b && ollama pull bge-m3"
     cis-kafka:
       image: bitnami/kafka:latest
       container_name: cis-kafka      
@@ -205,7 +245,41 @@ services:
         - timescaledb-data:/var/lib/postgresql/data
       networks:
         - crit_infra_net
-      
+        
+    cis-rag-anything:
+      build: services/rag_anything
+      container_name: cis-rag-anything
+      restart: unless-stopped
+      ports:
+        - "8000:8000"
+      environment:
+        PGHOST: timescaledb
+        PGPORT: 5432
+        PGUSER: "postgres"
+        PGPASSWORD: "password"
+        PGDATABASE: "anomalydetection"
+        PGSSLMODE: "disable"
+        NEO4J_URI: "bolt://cis-neo4j:7698"
+        NEO4J_USER: "neo4j"
+        NEO4J_PASSWORD: "changeme"        
+        OPENAI_MODEL: "llama3.1:8b"
+        OPENAI_EMBEDDING_MODEL: "bge-m3"
+        RAG_SECRETS_FILE: "run/secrets/rag_anything"
+        RAG_WORKING_DIR: "/app/data/rag_storage"
+        RAG_KB_DIR: "/app/kb"
+        RAG_OUTPUT_DIR: "/app/data/output"
+        OPENAI_BASE_URL: "http://cis-ollama:11434/v1"
+        OPENAI_API_KEY: "ollama"
+      depends_on:
+        cis-timescaledb:
+          condition: service_healthy
+      networks:
+        - crit_infra_net
+      secrets:
+        - rag_anything
+      volumes:
+        - rag-anything-data:/app/data
+        - ./schemas:/app/schemas
     cis-test-data-loader:
       build: services/test_data_load
       container_name: cis-test-data-load
@@ -421,3 +495,6 @@ services:
       restart: "no"
       # This service runs once to initialize the database and then exits
       
+secrets:
+  rag_anything:
+    file: ragAnythingSecrets.json
