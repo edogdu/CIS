@@ -8,7 +8,7 @@ class SnapshotRepository:
     async def create_snapshot(request: GenerateGraphRequest, bucket) -> str:
         neo4j = await DataFactory.get_neo4j_instance()
         async with neo4j.session() as session:
-            snapshot_id = f"{request.system_id}_{bucket}"
+            snapshot_id = f"{request.system_id}_{request.duration}s_{bucket}"
             await session.run(
                 """
                 MERGE (s:Snapshot {id: $snapshot_id})

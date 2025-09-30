@@ -6,3 +6,4 @@ class GenerateGraphRequest(BaseModel):
     start_time: datetime = Field(..., description="Start timestamp for the graph data")
     end_time: datetime = Field(..., description="End timestamp for the graph data")
     system_id: str = Field(..., description="Identifier for the system")
+    duration: int = Field(..., description="Duration in seconds for each time bucket")

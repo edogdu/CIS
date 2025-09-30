@@ -119,8 +119,8 @@ def init_db():
                 # Create hypertables if they don't exist
                 cur.execute(sql.SQL("SELECT create_hypertable('phys_raw', 'log_ts', if_not_exists => TRUE);"))
                 cur.execute(sql.SQL("SELECT create_hypertable('scada_raw', 'log_ts', if_not_exists => TRUE);"))                
-                
 
+                # Create 30-second aggregate views
                 cur.execute("""
                             CREATE MATERIALIZED VIEW IF NOT EXISTS phys_agg_30s 
                             WITH (timescaledb.continuous) AS
@@ -206,6 +206,178 @@ def init_db():
                             ) AS dst ON TRUE;
                             """)
                 
+                # Create 16 second aggregate views
+                cur.execute("""
+                            CREATE MATERIALIZED VIEW IF NOT EXISTS phys_agg_16s 
+                            WITH (timescaledb.continuous) AS
+                            SELECT
+                                time_bucket('16 seconds', r.log_ts) AS bucket,
+                                r.system_id,
+                                m.prop_key,
+                                m.asset_id,
+                                AVG(r.measure_value) AS avg_value,
+                                MAX(r.measure_value) AS max_value,
+                                MIN(r.measure_value) AS min_value,
+                                COUNT(*) AS num_measurements
+                            FROM phys_raw r
+                            JOIN phys_measurements_metadata m ON r.measurement_id = m.measurement_id
+                            GROUP BY bucket, r.system_id, m.prop_key, m.asset_id
+                            WITH NO DATA;
+                            """)
+                
+                cur.execute("""
+                            CREATE MATERIALIZED VIEW IF NOT EXISTS scada_agg_16s 
+                            WITH (timescaledb.continuous) AS
+                            SELECT
+                                time_bucket('16 seconds', log_ts) AS bucket,
+                                system_id,
+                                source_ip,
+                                source_port,
+                                source_mac,
+                                destination_ip,
+                                destination_port,
+                                destination_mac,
+                                protocol,
+                                AVG(total_size) AS avg_size,
+                                SUM(source_number_packets) AS source_total_packets,
+                                SUM(destination_number_packets) AS destination_total_packets,
+                                MIN(total_size) AS min_size,
+                                MAX(total_size) AS max_size,
+                                COUNT(*) AS num_connections,
+                                COALESCE(host(source_ip), lower(source_mac::text)) AS source_key,
+                                COALESCE(host(destination_ip), lower(destination_mac::text)) AS destination_key
+                            FROM scada_raw
+                            GROUP BY bucket, system_id, source_ip, source_port, source_mac, destination_ip, destination_port, destination_mac, protocol
+                            WITH NO DATA;
+                            """)
+                
+                cur.execute("""
+                            CREATE MATERIALIZED VIEW IF NOT EXISTS scada_resolved_agg_16s AS
+                            SELECT
+                                s.bucket,
+                                s.system_id,
+                                s.protocol,
+                                s.avg_size,
+                                s.source_total_packets,
+                                s.destination_total_packets,
+                                s.min_size,
+                                s.max_size,
+                                s.num_connections,
+                                s.source_ip,
+                                s.source_port,
+                                s.source_mac,
+                                s.destination_ip,
+                                s.destination_port,
+                                s.destination_mac,
+                                s.source_key,
+                                s.destination_key,
+                                src.asset_id AS source_asset,
+                                dst.asset_id AS destination_asset
+                            FROM scada_agg_16s s
+                            LEFT JOIN LATERAL (
+                                SELECT asset_id
+                                FROM network_endpoints
+                                WHERE (s.source_ip IS NOT NULL AND ip = s.source_ip)
+                                   OR (s.source_mac IS NOT NULL AND mac = s.source_mac)
+                                ORDER BY (ip IS NOT NULL) DESC, (mac IS NOT NULL) DESC
+                                LIMIT 1
+                            ) AS src ON TRUE
+                            LEFT JOIN LATERAL (
+                                SELECT asset_id
+                                FROM network_endpoints
+                                WHERE (s.destination_ip IS NOT NULL AND ip = s.destination_ip)
+                                   OR (s.destination_mac IS NOT NULL AND mac = s.destination_mac)
+                                ORDER BY (ip IS NOT NULL) DESC, (mac IS NOT NULL) DESC
+                                LIMIT 1
+                            ) AS dst ON TRUE;
+                            """)
+
+
+                # Create 10 second aggregate views
+                cur.execute("""
+                            CREATE MATERIALIZED VIEW IF NOT EXISTS phys_agg_10s 
+                            WITH (timescaledb.continuous) AS
+                            SELECT
+                                time_bucket('10 seconds', r.log_ts) AS bucket,
+                                r.system_id,
+                                m.prop_key,
+                                m.asset_id,
+                                AVG(r.measure_value) AS avg_value,
+                                MAX(r.measure_value) AS max_value,
+                                MIN(r.measure_value) AS min_value,
+                                COUNT(*) AS num_measurements
+                            FROM phys_raw r
+                            JOIN phys_measurements_metadata m ON r.measurement_id = m.measurement_id
+                            GROUP BY bucket, r.system_id, m.prop_key, m.asset_id
+                            WITH NO DATA;
+                            """)
+                
+                cur.execute("""
+                            CREATE MATERIALIZED VIEW IF NOT EXISTS scada_agg_10s 
+                            WITH (timescaledb.continuous) AS
+                            SELECT
+                                time_bucket('10 seconds', log_ts) AS bucket,
+                                system_id,
+                                source_ip,
+                                source_port,
+                                source_mac,
+                                destination_ip,
+                                destination_port,
+                                destination_mac,
+                                protocol,
+                                AVG(total_size) AS avg_size,
+                                SUM(source_number_packets) AS source_total_packets,
+                                SUM(destination_number_packets) AS destination_total_packets,
+                                MIN(total_size) AS min_size,
+                                MAX(total_size) AS max_size,
+                                COUNT(*) AS num_connections,
+                                COALESCE(host(source_ip), lower(source_mac::text)) AS source_key,
+                                COALESCE(host(destination_ip), lower(destination_mac::text)) AS destination_key
+                            FROM scada_raw
+                            GROUP BY bucket, system_id, source_ip, source_port, source_mac, destination_ip, destination_port, destination_mac, protocol
+                            WITH NO DATA;
+                            """)
+                
+                cur.execute("""
+                            CREATE MATERIALIZED VIEW IF NOT EXISTS scada_resolved_agg_10s AS
+                            SELECT
+                                s.bucket,
+                                s.system_id,
+                                s.protocol,
+                                s.avg_size,
+                                s.source_total_packets,
+                                s.destination_total_packets,
+                                s.min_size,
+                                s.max_size,
+                                s.num_connections,
+                                s.source_ip,
+                                s.source_port,
+                                s.source_mac,
+                                s.destination_ip,
+                                s.destination_port,
+                                s.destination_mac,
+                                s.source_key,
+                                s.destination_key,
+                                src.asset_id AS source_asset,
+                                dst.asset_id AS destination_asset
+                            FROM scada_agg_10s s
+                            LEFT JOIN LATERAL (
+                                SELECT asset_id
+                                FROM network_endpoints
+                                WHERE (s.source_ip IS NOT NULL AND ip = s.source_ip)
+                                   OR (s.source_mac IS NOT NULL AND mac = s.source_mac)
+                                ORDER BY (ip IS NOT NULL) DESC, (mac IS NOT NULL) DESC
+                                LIMIT 1
+                            ) AS src ON TRUE
+                            LEFT JOIN LATERAL (
+                                SELECT asset_id
+                                FROM network_endpoints
+                                WHERE (s.destination_ip IS NOT NULL AND ip = s.destination_ip)
+                                   OR (s.destination_mac IS NOT NULL AND mac = s.destination_mac)
+                                ORDER BY (ip IS NOT NULL) DESC, (mac IS NOT NULL) DESC
+                                LIMIT 1
+                            ) AS dst ON TRUE;
+                            """)
 
 
                 print("Database tables and views initialized successfully.")
