@@ -12,12 +12,18 @@ def init_db():
                             DROP MATERIALIZED VIEW IF EXISTS phys_agg_30s CASCADE;
                             DROP MATERIALIZED VIEW IF EXISTS scada_agg_30s CASCADE;
                             DROP VIEW IF EXISTS scada_resolved_agg_30s CASCADE;
-                            DROP TABLE IF EXISTS phys_raw;
-                            DROP TABLE IF EXISTS scada_raw;
-                            DROP TABLE IF EXISTS scada_staging;
-                            DROP TABLE IF EXISTS phys_measurements_metadata;
-                            DROP TABLE IF EXISTS network_endpoints;
-                            DROP TABLE IF EXISTS assets;                            
+                            DROP MATERIALIZED VIEW IF EXISTS phys_agg_16s CASCADE;
+                            DROP MATERIALIZED VIEW IF EXISTS scada_agg_16s CASCADE;
+                            DROP VIEW IF EXISTS scada_resolved_agg_16s CASCADE;
+                            DROP MATERIALIZED VIEW IF EXISTS phys_agg_10s CASCADE;
+                            DROP MATERIALIZED VIEW IF EXISTS scada_agg_10s CASCADE;
+                            DROP VIEW IF EXISTS scada_resolved_agg_10s CASCADE;
+                            DROP TABLE IF EXISTS phys_raw CASCADE;
+                            DROP TABLE IF EXISTS scada_raw CASCADE;
+                            DROP TABLE IF EXISTS scada_staging CASCADE;
+                            DROP TABLE IF EXISTS phys_measurements_metadata CASCADE;
+                            DROP TABLE IF EXISTS network_endpoints CASCADE;
+                            DROP TABLE IF EXISTS assets CASCADE;                            
                             """)
                 # Create table if it doesn't exist                
                 cur.execute("""
@@ -132,7 +138,9 @@ def init_db():
                                 AVG(r.measure_value) AS avg_value,
                                 MAX(r.measure_value) AS max_value,
                                 MIN(r.measure_value) AS min_value,
-                                COUNT(*) AS num_measurements
+                                COUNT(*) AS num_measurements,
+                            COALESCE(SUM(NULLIF(r.attributes->>'Label_n', '0')::INT), 0) AS num_attacks,
+                            array_agg(DISTINCT r.attributes->>'Label') FILTER (WHERE r.attributes ? 'Label') AS attack_types
                             FROM phys_raw r
                             JOIN phys_measurements_metadata m ON r.measurement_id = m.measurement_id
                             GROUP BY bucket, r.system_id, m.prop_key, m.asset_id
@@ -157,7 +165,9 @@ def init_db():
                                 SUM(destination_number_packets) AS destination_total_packets,
                                 MIN(total_size) AS min_size,
                                 MAX(total_size) AS max_size,
-                                COUNT(*) AS num_connections,
+                                COUNT(*) AS num_connections,                            
+                            COALESCE(SUM(NULLIF(attributes->>'label_n', '0')::INT), 0) AS num_attacks,
+                            array_agg(DISTINCT attributes->>'label') FILTER (WHERE attributes ? 'label') AS attack_types,
                                 COALESCE(host(source_ip), lower(source_mac::text)) AS source_key,
                                 COALESCE(host(destination_ip), lower(destination_mac::text)) AS destination_key
                             FROM scada_raw
@@ -185,6 +195,8 @@ def init_db():
                                 s.destination_mac,
                                 s.source_key,
                                 s.destination_key,
+                            s.num_attacks,
+                            s.attack_types,
                                 src.asset_id AS source_asset,
                                 dst.asset_id AS destination_asset
                             FROM scada_agg_30s s
@@ -218,7 +230,9 @@ def init_db():
                                 AVG(r.measure_value) AS avg_value,
                                 MAX(r.measure_value) AS max_value,
                                 MIN(r.measure_value) AS min_value,
-                                COUNT(*) AS num_measurements
+                                COUNT(*) AS num_measurements,
+                            COALESCE(SUM(NULLIF(r.attributes->>'Label_n', '0')::INT), 0) AS num_attacks,
+                            array_agg(DISTINCT r.attributes->>'Label') FILTER (WHERE r.attributes ? 'Label') AS attack_types
                             FROM phys_raw r
                             JOIN phys_measurements_metadata m ON r.measurement_id = m.measurement_id
                             GROUP BY bucket, r.system_id, m.prop_key, m.asset_id
@@ -243,7 +257,9 @@ def init_db():
                                 SUM(destination_number_packets) AS destination_total_packets,
                                 MIN(total_size) AS min_size,
                                 MAX(total_size) AS max_size,
-                                COUNT(*) AS num_connections,
+                                COUNT(*) AS num_connections,                            
+                            COALESCE(SUM(NULLIF(attributes->>'label_n', '0')::INT), 0) AS num_attacks,
+                            array_agg(DISTINCT attributes->>'label') FILTER (WHERE attributes ? 'label') AS attack_types,
                                 COALESCE(host(source_ip), lower(source_mac::text)) AS source_key,
                                 COALESCE(host(destination_ip), lower(destination_mac::text)) AS destination_key
                             FROM scada_raw
@@ -271,6 +287,8 @@ def init_db():
                                 s.destination_mac,
                                 s.source_key,
                                 s.destination_key,
+                            s.num_attacks,
+                            s.attack_types,
                                 src.asset_id AS source_asset,
                                 dst.asset_id AS destination_asset
                             FROM scada_agg_16s s
@@ -305,7 +323,9 @@ def init_db():
                                 AVG(r.measure_value) AS avg_value,
                                 MAX(r.measure_value) AS max_value,
                                 MIN(r.measure_value) AS min_value,
-                                COUNT(*) AS num_measurements
+                                COUNT(*) AS num_measurements,                            
+                            COALESCE(SUM(NULLIF(r.attributes->>'Label_n', '0')::INT), 0) AS num_attacks,
+                            array_agg(DISTINCT r.attributes->>'Label') FILTER (WHERE r.attributes ? 'Label') AS attack_types
                             FROM phys_raw r
                             JOIN phys_measurements_metadata m ON r.measurement_id = m.measurement_id
                             GROUP BY bucket, r.system_id, m.prop_key, m.asset_id
@@ -330,7 +350,9 @@ def init_db():
                                 SUM(destination_number_packets) AS destination_total_packets,
                                 MIN(total_size) AS min_size,
                                 MAX(total_size) AS max_size,
-                                COUNT(*) AS num_connections,
+                                COUNT(*) AS num_connections,                            
+                            COALESCE(SUM(NULLIF(attributes->>'label_n', '0')::INT), 0) AS num_attacks,
+                            array_agg(DISTINCT attributes->>'label') FILTER (WHERE attributes ? 'label') AS attack_types,
                                 COALESCE(host(source_ip), lower(source_mac::text)) AS source_key,
                                 COALESCE(host(destination_ip), lower(destination_mac::text)) AS destination_key
                             FROM scada_raw
@@ -358,6 +380,8 @@ def init_db():
                                 s.destination_mac,
                                 s.source_key,
                                 s.destination_key,
+                                s.num_attacks,
+                                s.attack_types,
                                 src.asset_id AS source_asset,
                                 dst.asset_id AS destination_asset
                             FROM scada_agg_10s s

@@ -100,12 +100,14 @@ async  def generate_graph(request: GenerateGraphRequest):
     
 @app.get("/export_aggregate_data")
 async def export_aggregate_data():
+    table_names = ['phys_agg_30s', 'phys_agg_16s', 'phys_agg_10s', 'scada_agg_30s'
+                   , 'scada_agg_16s', 'scada_agg_10s', 'scada_resolved_agg_30s'
+                   , 'scada_resolved_agg_16s', 'scada_resolved_agg_10s']
     with connect() as conn:            
-        query = "SELECT * FROM scada_resolved_agg_30s ORDER BY bucket;"
-        df = pd.read_sql_query(query, conn)
-        df.to_csv(f"{data_dir}/testbed_system_1/aggregated.csv",index=False)
-
-@app.get("/export_sys_config")
+        for table in table_names:
+            query = f"SELECT * FROM {table} ORDER BY bucket;"
+            df = pd.read_sql_query(query, conn)
+            df.to_csv(f"{data_dir}/testbed_system_1/{table}.csv",index=False)
 async def export_sys_config():
     with connect() as conn:            
         q1 = "SELECT * FROM assets"
