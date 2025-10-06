@@ -35,9 +35,18 @@ async def consume_generate_graph_request():
             
 
             request = GenerateGraphRequest.model_validate(body)
+            if(not request):
+                log.error(f"Invalid GenerateGraphRequest: {body}")
+                continue
+            if(request.end_time <= request.start_time):
+                log.error(f"Invalid GenerateGraphRequest: end_time must be after start_time: {body}")
+                continue
+            if(request.duration not in [10, 16, 30]):
+                log.error(f"Invalid GenerateGraphRequest: duration must be one of [10, 16, 30]: {body}")
+                continue
             log.info(f"Generate Graph Request: {request.model_dump_json()}")
-            scada_records = await AggregateRepository.fetch_scada_aggregates(start_time=request.start_time, end_time=request.end_time, system_id=request.system_id)
-            physical_records = await AggregateRepository.fetch_physical_aggregates(start_time=request.start_time, end_time=request.end_time, system_id=request.system_id)
+            scada_records = await AggregateRepository.fetch_scada_aggregates(start_time=request.start_time, end_time=request.end_time, duration=request.duration, system_id=request.system_id)
+            physical_records = await AggregateRepository.fetch_physical_aggregates(start_time=request.start_time, end_time=request.end_time, duration=request.duration, system_id=request.system_id)
 
             log.info(f"Fetched {len(physical_records)} physical records for system_id {request.system_id} between {request.start_time} and {request.end_time}")
             log.info(f"Fetched {len(scada_records)} SCADA records for system_id {request.system_id} between {request.start_time} and {request.end_time}")

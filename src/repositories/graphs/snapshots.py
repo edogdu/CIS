@@ -3,24 +3,27 @@ from schemas.GenerateGraphRequest import GenerateGraphRequest
 from schemas.ScadaAggregate import ScadaAggregate
 from schemas.PhysicalAggregate import PhysicalAggregate
 import datetime
+
 class SnapshotRepository:
         
     async def create_snapshot(request: GenerateGraphRequest, bucket) -> str:
         neo4j = await DataFactory.get_neo4j_instance()
         async with neo4j.session() as session:
-            snapshot_id = f"{request.system_id}_{bucket}"
+            snapshot_id = f"{request.system_id}_{request.duration}s_{bucket}"
             await session.run(
                 """
-                MERGE (s:Snapshot {id: $snapshot_id})
+                MERGE (s:Snapshot {snapshot_id: $snapshot_id})
                 SET s.system_id = $system_id,
                     s.start_time = $start_time,
                     s.end_time = $end_time,
-                    s.created_at = datetime()
+                    s.created_at = datetime(),
+                    s.duration = $duration
                 """,
                 snapshot_id=snapshot_id,
                 system_id=request.system_id,
                 start_time=bucket,
-                end_time=bucket + datetime.timedelta(seconds=30)
+                end_time=(bucket + datetime.timedelta(seconds=request.duration)),
+                duration=request.duration
             )
             return snapshot_id
 
@@ -32,7 +35,7 @@ class SnapshotRepository:
                     """                    
                     MATCH (a:Asset {asset_id: $asset_id})
                     MERGE (m:Measurement {
-                        start_time: datetime($bucket),
+                        start_time: $bucket,
                         system_id: a.system_id,
                         asset_id: a.asset_id,
                         snapshot_id: $snapshot_id,
@@ -61,11 +64,11 @@ class SnapshotRepository:
             for record in scada_data:
                 await session.run(
                     """
-                    MATCH (s:Snapshot {id: $snapshot_id})
+                    MATCH (s:Snapshot {snapshot_id: $snapshot_id})
                     MATCH (src:Endpoint {key: $source_key})
                     MATCH (dst:Endpoint {key: $destination_key})
                     MERGE (conn:Connection {
-                        start_time: datetime($bucket),
+                        start_time: $bucket,
                         duration: $duration,
                         protocol: $protocol,
                         avg_size: $avg_size,
@@ -103,3 +106,94 @@ class SnapshotRepository:
                     source_key=record.source_key,
                     destination_key=record.destination_key
                 )
+
+    async def get_snapshots(start_time: str, end_time: str, duration:int, system_id: str):
+        neo4j = await DataFactory.get_neo4j_instance()
+        async with neo4j.session() as session:
+            #WHERE s.start_time >= datetime($start_time) AND s.end_time <= datetime($end_time) AND s.duration = $duration AND s.system_id = $system_id
+            result = await session.run(
+                """
+                MATCH (s:Snapshot{system_id: $system_id, duration: $duration})
+                WHERE datetime(s.start_time) >= datetime($start_time) 
+                    AND datetime(s.start_time) <= datetime($end_time)
+                OPTIONAL MATCH (c:Connection {snapshot_id: s.snapshot_id})
+                WITH s, collect(c) as connection_nodes
+                OPTIONAL MATCH (m:Measurement {snapshot_id: s.snapshot_id})
+                WITH s, connection_nodes + collect(m) as anchor_nodes
+                WHERE size(anchor_nodes) > 0
+                CALL apoc.path.subgraphAll(anchor_nodes, {
+                    maxLevel: 3,
+                    labelFilter: '+Endpoint|+Asset|+Measurement|+Connection',
+                    relationshipFilter: 'INITIATES>|TERMINATES_AT>|HAS_MEASUREMENT>|CONNECTED_TO>'
+                })
+                YIELD nodes, relationships
+                WITH s, 
+                [n IN nodes | {
+                    id: id(n),
+                    labels: labels(n),
+                    properties: apoc.map.removeKeys(properties(n), ['snapshot_id', 'system_id'])
+                }] AS node_list,     
+                [r IN relationships | {
+                    type: type(r),
+                    source: id(startNode(r)),
+                    target: id(endNode(r)),
+                    properties: properties(r)
+                }] AS relationship_list
+                ORDER BY s.start_time
+                RETURN {
+                    snapshot_id: s.snapshot_id,
+                    start_time: s.start_time,
+                    end_time: s.end_time,
+                    duration: s.duration,
+                    nodes: node_list,
+                    relationships: relationship_list
+                } AS snapshot
+                """,
+                start_time=start_time,
+                end_time=end_time,
+                duration=duration,
+                system_id=system_id
+            )
+            
+            # collect all records into a list            
+            if result:
+                return [record["snapshot"] async for record in result]
+            else:
+                return []
+            
+        
+    async def get_snapshot(snapshot_id: str):
+        neo4j = await DataFactory.get_neo4j_instance()
+        async with neo4j.session() as session:
+            result = await session.run(
+                """
+                MATCH (c:Connection {snapshot_id: $snapshot_id})
+                WITH collect(c) as connection_nodes
+                MATCH (m:Measurement {snapshot_id: $snapshot_id})
+                WITH connection_nodes + collect(m) as anchor_nodes
+                CALL apoc.path.subgraphAll(anchor_nodes, {
+                    maxLevel: 5
+                })
+                YIELD nodes, relationships
+                RETURN {
+                    nodes: [node IN nodes | {
+                        id: id(node),
+                        labels: labels(node),
+                        // MODIFICATION: Remove both keys from the properties map
+                        properties: apoc.map.removeKeys(properties(node), ['snapshot_id', 'system_id'])
+                    }],
+                    relationships: [rel IN relationships | {
+                        type: type(rel),
+                        source: id(startNode(rel)),
+                        target: id(endNode(rel)),
+                        properties: properties(rel)
+                    }]
+                }
+                """,
+                snapshot_id=snapshot_id
+            )
+            record = await result.single()
+            if record:
+                return record["value"]
+            else:
+                return None

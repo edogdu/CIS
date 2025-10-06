@@ -1,4 +1,4 @@
-from XaiExplainer import XaiExplainer
+from xai.XaiExplainer import XaiExplainer
 
 class LimeExplainer(XaiExplainer):
     def __init__(self, model):
