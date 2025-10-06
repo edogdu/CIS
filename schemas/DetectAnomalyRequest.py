@@ -1,7 +1,7 @@
 from pydantic import BaseModel
 from typing import Optional
-from XaiTypes import XaiTypes
-from ModelTypes import ModelTypes
+from schemas.XaiTypes import XaiTypes
+from schemas.ModelTypes import ModelTypes
 
 class DetectAnomalyRequest(BaseModel):
     snapshot_id: Optional[str]

@@ -1,4 +1,4 @@
-from pydantic import Enum,auto
+from enum import Enum, auto
 
 class XaiTypes(str, Enum):
     SHAP = auto()

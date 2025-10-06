@@ -1,4 +1,4 @@
-from pydantic import Enum, auto
+from enum import Enum, auto
 
 class ModelTypes(str, Enum):
     GNN = auto()

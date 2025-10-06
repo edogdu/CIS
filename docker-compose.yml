@@ -299,6 +299,7 @@ services:
         KAFKA_BOOTSTRAP_SERVERS: "cis-kafka:9092"
         KAFKA_PHYS_TOPIC: "Data.Raw.Physical"
         KAFKA_SCADA_TOPIC: "Data.Raw.Scada"
+        KAFKA_ANOMALY_TOPIC: "Anomaly.Predict"
         KAFKA_GENERATE_GRAPH_TOPIC: "Data.Graphs"
         DATA_DIR: "/app/data"
         SCHEMA_DIR: "/app/schemas"
@@ -450,6 +451,8 @@ services:
         - ./schemas:/app/schemas
         - ./src/factories:/app/factories
         - ./src/repositories:/app/repositories
+        - './src/models:/app/models'
+        - './src/xai:/app/xai'
     cis-alerts-consumer:
       build: ./src/alerts
       container_name: cis-alerts-consumer
