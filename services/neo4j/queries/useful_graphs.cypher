@@ -13,7 +13,8 @@ MATCH n=(src:Endpoint)-[:INITIATES]->(c:Connection{snapshot_id: 'testbed_system_
 MATCH n2=(c)-[:TERMINATES_AT]->(e2:Endpoint)
 OPTIONAL MATCH ctr=(a:Asset)-[:HAS_ENDPOINT]->(e)
 OPTIONAL MATCH ctr2=(a2:Asset)-[:HAS_ENDPOINT]->(e2)
-RETURN p,n,n2,ctr,ctr2
+OPTIONAL MATCH rf=(a)-[:READS_FROM]->()
+RETURN p,n,n2,ctr,ctr2, rf
 
 /* Clear The Database */
 MATCH (n) DETACH DELETE n

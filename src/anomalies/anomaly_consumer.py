@@ -1,13 +1,19 @@
 import asyncio, os, json, logging, orjson
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
-from schemas.GenerateGraphRequest import GenerateGraphRequest
 from pydantic import ValidationError
 from repositories.graphs.snapshots import SnapshotRepository
 from repositories.persistence.aggregate import AggregateRepository
 from schemas.ScadaAggregate import ScadaAggregate
+from schemas.DetectAnomalyRequest import DetectAnomalyRequest
 from repositories.persistence.network import NetworkRepository
 from repositories.graphs.systems import SystemRepository
 from factories.data import DataFactory
+from factories.models import ModelRepositoryFactory
+from schemas.ModelTypes import ModelTypes
+from schemas.XaiTypes import XaiTypes
+from repositories.graphs.pyg_builder import to_pyg_data, global_schema
+
+SEM = asyncio.Semaphore(2)  # limit to 2 concurrent processing
 
 schema_dir = os.getenv('SCHEMA_DIR','/app/schemas')
 logging.basicConfig(level=logging.INFO
@@ -18,35 +24,135 @@ log = logging.getLogger("anomaly_consumer")
 kafka_bootstrap_servers = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092')
 kafka_scada_topic = os.getenv('KAFKA_TOPIC', 'Anomaly.Predict')
 
-async def consume_generate_graph_request():
+def _snapshots_to_dataset(snapshots):
+    dataset = []
+    for snapshot in snapshots:
+        try:
+            pyg_data = to_pyg_data(snapshot, schema=global_schema)
+            dataset.append(pyg_data)
+        except Exception as e:
+            log.error(f"Error converting snapshot to PyG data: {e}")
+    return dataset
+
+async def handle_message(request):
+    async with SEM:
+        await _process_request(request)
+
+async def _process_request(request: DetectAnomalyRequest):
+    # run in a new thread to avoid blocking        
+    snapshots = []
+    if request.snapshot_id and request.snapshot_id.strip() != "":
+        snapshots.append(await SnapshotRepository.get_snapshot(request.snapshot_id))
+    else:
+        snapshots = await SnapshotRepository.get_snapshots(request.start_time, request.end_time, request.duration, request.system_id)
+    if len(snapshots) == 0:
+        log.error(f"No snapshots found between {request.start_time} and {request.end_time}")
+        return  []
+    results = []
+    dataset = _snapshots_to_dataset(snapshots)
+    if not dataset:
+        log.error("No valid PyG data could be created from snapshots")
+        return []
+
+    config = {
+        "learning_rate": 0.001,
+        "weight_decay": 0.0001,
+        "epochs": 100,
+        "dropout": 0.5,
+        "val_frac": 0.1,
+        "test_frac": 0.1,
+        "is_undirected": True,
+        "xai_topk": 20,
+        "xai_loss_min": None
+    }
+    if request.model_config:
+        config.update(request.model_config)
+    log.info(f"Model config: {config}")
+    
+    # create model runner based on model type
+    if request.model_type == ModelTypes.GNN:
+        model_runner = ModelRepositoryFactory.get_model_runner(
+            model_type=request.model_type,                    
+            input_dim=dataset[0].num_node_features,
+            hidden_dim=16,
+            output_dim=16,
+            xai_type=request.xai_type,
+            device=None,
+            config=config,
+        )
+        if request.is_train:
+            model_runner.prepare_splits(dataset)
+            log.info(f"Training model: {request.model_type}")
+            def _train():
+                return model_runner.train_epochs(epochs=config['epochs'])
+            # run in a new thread to avoid blocking
+            loop = asyncio.get_event_loop()
+            train_loss = await loop.run_in_executor(None, _train)
+            log.info(f"Training completed with final loss: {train_loss}")
+            #system_id, model_name, history, path
+            model_runner.save_history_csv(request.system_id,
+                                            request.model_type.value,
+                                            train_loss,
+                                            './logs')
+            results = model_runner.evaluate_test()
+            log.info(f"Evaluation results: {results}")
+            model_runner.save_test_csv(request.system_id,
+                                        request.model_type.value,
+                                        results,
+                                        './logs')
+            model_runner.save_model(f'./models/{request.system_id}_{request.model_type.value}_{request.duration}s.pt')
+            for data in dataset:
+                log.info(f"Explaining data with {data.num_nodes} nodes and {data.num_edges} edges")
+                model_runner.explain(data, topk=config.get('xai_topk', 20))
+        else:
+            log.info(f"Loading model for inference: {request.model_type}")
+            model_runner.load_model(f'./models/{request.system_id}_{request.model_type.value}_{request.duration}s.pt')
+            log.info("Model loaded, starting inference")
+            results = model_runner.predict(dataset)
+            log.info(f"Inference results: {results}")
+    elif request.model_type == ModelTypes.XGBOOST:
+        raise NotImplementedError("XGBoost model runner not implemented yet")
+    
+    else:
+        log.error(f"Unsupported model type: {request.model_type}")
+        return []
+
+async def consume_anomaly_predict_request():
     consumer = AIOKafkaConsumer(
         kafka_scada_topic,
         bootstrap_servers=kafka_bootstrap_servers,
-        group_id='anomaly_consumer_group'
+        group_id='anomaly_consumer_group',
+        auto_offset_reset='earliest',
+        enable_auto_commit=True,
+        session_timeout_ms=45000,
+        max_poll_interval_ms=300000,
+        heartbeat_interval_ms=15000,
+        request_timeout_ms=60000
+
     )
     await consumer.start()
+    tasks = set()
     try:
         
         async for msg in consumer:
             body = orjson.loads(msg.value)
             log.info(f"Received message: {body}")
-            snapshot_id = body.get("snapshot_id", None)
-            
-            if snapshot_id:
-                # create gnn model
-
-                # train gnn model
-
-                # store results
-
-                #store xai results
-
-                # if anomaly detected, produce to anomaly topic
-                log.info(f"Processing existing snapshot_id: {snapshot_id}")
+            try:
+                request = DetectAnomalyRequest.model_validate(body)                
+            except ValidationError as e:
+                log.error(f"Validation error: {e.json()}")
                 continue
+            # process request to avoid blocking
+            log.info(f"Processing request: {request.model_type}, {request.xai_type}, {request.system_id}, {request.start_time} to {request.end_time}")
+            t = asyncio.create_task(handle_message(request))
+            t.add_done_callback(lambda task: log.info("Request processing task completed with result: %s", task.result() if not task.exception() else f"Error: {task.exception()}"))
+            tasks.add(t)
+            t.add_done_callback(lambda task: tasks.discard(task))
+            log.info("Request processing task started")
 
     finally:
+        await asyncio.gather(*tasks)  # wait for all tasks to complete
         await consumer.stop()
 
 if __name__ == "__main__":
-    asyncio.run(consume_generate_graph_request())
+    asyncio.run(consume_anomaly_predict_request())

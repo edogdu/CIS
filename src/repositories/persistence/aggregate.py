@@ -6,12 +6,12 @@ from psycopg.rows import class_row, dict_row
 
 class AggregateRepository:
 
-    async def fetch_physical_aggregates(start_time, end_time, system_id) -> list[PhysicalAggregate]:        
+    async def fetch_physical_aggregates(start_time, end_time, duration, system_id) -> list[PhysicalAggregate]:        
         pool = await DataFactory.get_pg_pool()
-        query = """
+        query = f"""
         SELECT 
             bucket,
-            30 AS duration,
+            {duration} AS duration,
             system_id,
             asset_id,
             prop_key,
@@ -19,7 +19,7 @@ class AggregateRepository:
             min_value,
             max_value,
             num_measurements
-        FROM phys_agg_30s
+        FROM phys_agg_{duration}s
         WHERE bucket >= %s AND bucket < %s AND system_id = %s
         ORDER BY bucket;
         """
@@ -29,12 +29,12 @@ class AggregateRepository:
                 rows: list[PhysicalAggregate] = await cur.fetchall()
                 return rows
 
-    async def fetch_scada_aggregates(start_time, end_time, system_id) -> list[ScadaAggregate]:
+    async def fetch_scada_aggregates(start_time, end_time, duration, system_id) -> list[ScadaAggregate]:
         pool = await DataFactory.get_pg_pool()
-        query = """
+        query = f"""
         SELECT 
             bucket,
-            30 AS duration,
+            {duration} AS duration,
             system_id,
             protocol,
             avg_size,
@@ -51,7 +51,7 @@ class AggregateRepository:
             destination_mac::text AS destination_mac,
             source_key,
             destination_key
-        FROM scada_resolved_agg_30s
+        FROM scada_resolved_agg_{duration}s
         WHERE bucket >= %s AND bucket < %s AND system_id = %s
         AND source_key IS NOT NULL AND destination_key IS NOT NULL
         ORDER BY bucket;

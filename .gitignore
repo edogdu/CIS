@@ -14,7 +14,7 @@ data/**/*.csv
 .env
 .env.*
 .DS_Store
-./**/Logs/*
+/**/Logs/*
 ./**/.venv
 .venv/
 !.gitkeep

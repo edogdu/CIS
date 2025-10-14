@@ -8,11 +8,14 @@ from schemas.PhysicalLog import PhysicalLog
 from schemas.ScadaLog import ScadaLog
 from schemas.GenerateGraphRequest import GenerateGraphRequest
 from psycopg import sql, connect
+from schemas.DetectAnomalyRequest import DetectAnomalyRequest
+from schemas.XaiTypes import XaiTypes
 
 app = FastAPI()
 kafka_bootstrap_servers = os.getenv('KAFKA_BOOTSTRAP_SERVERS','kafka:9092')
 kafka_phys_topic = os.getenv('KAFKA_PHYS_TOPIC','Data.Raw.Physical')
 kafka_scada_topic = os.getenv('KAFKA_SCADA_TOPIC','Data.Raw.Scada')
+kafka_anomaly_topic = os.getenv('KAFKA_ANOMALY_TOPIC','Anomaly.Predict')
 kafka_generate_graph_topic = os.getenv('KAFKA_GENERATE_GRAPH_TOPIC','Data.Graphs')
 data_dir = os.getenv('DATA_DIR','/app/data')
 schema_dir = os.getenv('SCHEMA_DIR','/app/schemas')
@@ -97,15 +100,27 @@ async  def generate_graph(request: GenerateGraphRequest):
     await producer.flush()
     await producer.stop()
     return {"message": "Graph generation request sent"}
+
+@app.post("/train_gnn_model")
+async  def train_gnn_model(request: DetectAnomalyRequest):
+    producer = AIOKafkaProducer(bootstrap_servers=[kafka_bootstrap_servers])
+    await producer.start()
+    msg = request
+    await producer.send(topic=kafka_anomaly_topic, value=msg.json().encode('utf-8'))
+    await producer.flush()
+    await producer.stop()
+    return {"message": "GNN training request sent"}
     
 @app.get("/export_aggregate_data")
 async def export_aggregate_data():
+    table_names = ['phys_agg_30s', 'phys_agg_16s', 'phys_agg_10s', 'scada_agg_30s'
+                   , 'scada_agg_16s', 'scada_agg_10s', 'scada_resolved_agg_30s'
+                   , 'scada_resolved_agg_16s', 'scada_resolved_agg_10s']
     with connect() as conn:            
-        query = "SELECT * FROM scada_resolved_agg_30s ORDER BY bucket;"
-        df = pd.read_sql_query(query, conn)
-        df.to_csv(f"{data_dir}/testbed_system_1/aggregated.csv",index=False)
-
-@app.get("/export_sys_config")
+        for table in table_names:
+            query = f"SELECT * FROM {table} ORDER BY bucket;"
+            df = pd.read_sql_query(query, conn)
+            df.to_csv(f"{data_dir}/testbed_system_1/{table}.csv",index=False)
 async def export_sys_config():
     with connect() as conn:            
         q1 = "SELECT * FROM assets"
