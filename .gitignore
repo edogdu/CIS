@@ -9,8 +9,9 @@ __pycache__/
 # Ignore VSCode folders
 .vscode/
 .idea/
-data/**/*.csv
-*.pcap
+# Using Large File Storage (LFS) for large data files
+#data/**/*.csv
+#*.pcap
 .env
 .env.*
 .DS_Store
