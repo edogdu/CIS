@@ -1,5 +1,3 @@
-version: "3.9"
-
 volumes:
   kafka-data: 
     driver: local
@@ -20,44 +18,65 @@ networks:
     driver: bridge
 services:
     cis-spark-master:
-      image: bitnami/spark:3.5
+      image: apache/spark:3.5.1      
       container_name: cis-spark-master
+      profiles: [etl,data_load]
       restart: unless-stopped
+      command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
       environment:
         SPARK_MODE: "master"
+        SPARK_MASTER_HOST: "cis-spark-master"
+        SPARK_MASTER_PORT: 7077
+        SPARK_MASTER_WEBUI_PORT: 8080
+      healthcheck:
+        test: ["CMD", "curl", "-f", "http://localhost:8080"]
+        interval: 30s
+        timeout: 10s
+        retries: 5
+        start_period: 30s
       ports:
         - "8080:8080"
         - "7077:7077"
       networks:
         - crit_infra_net
       volumes:
-        - spark-data:/bitnami
+        - spark-data:/opt/spark/work-dir
         - ./Logs/spark:/logs
         - ./data:/data
     cis-spark-worker:
-      image: bitnami/spark:3.5
+      image: apache/spark:3.5.1      
       container_name: cis-spark-worker
+      profiles: [etl,data_load]
       restart: unless-stopped
+      command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://cis-spark-master:7077"]
       environment:
+        #TODO: Change as necessary depending on host machine available resources
         SPARK_MODE: "worker"
         SPARK_MASTER_URL: "spark://cis-spark-master:7077"
-
-        #TODO: Change as necessary depending on host machine available resources
         SPARK_WORKER_MEMORY: "16G"
         SPARK_WORKER_CORES: "8"
+        SPARK_WORKER_WEBUI_PORT: 8081
       ports:
         - "8089:8081"
       depends_on:
-        - cis-spark-master
+        cis-spark-master:
+          condition: service_healthy
+      healthcheck:
+        test: ["CMD", "curl", "-f", "http://localhost:8081"]
+        interval: 30s
+        timeout: 10s
+        retries: 5
+        start_period: 30s
       networks:
         - crit_infra_net
       volumes:
-        - spark-data:/bitnami
+        - spark-data:/opt/spark/work-dir
         - ./Logs/spark:/logs
         - ./data:/data
     cis-load-bigdata:
       build: services/spark
       container_name: cis-load-bigdata
+      profiles: [data_load]
       restart: "no"
       depends_on:
         - cis-spark-master
@@ -66,10 +85,10 @@ services:
       networks:
         - crit_infra_net
       volumes:
-        - spark-data:/bitnami
+        - spark-data:/opt/spark/work-dir
         - ./Logs/spark:/logs
-        - ./data:/data
-        - ./services/spark/data_scripts:/data_scripts
+        - ./services/spark/data_scripts:/data_scripts  
+        - ./data:/data     
       environment:
         HOME: "/tmp"
         USER: "spark"
@@ -84,7 +103,7 @@ services:
         PHYS_DATA_DIR: "file:///data/testbed_system_1/Physical"
         SCADA_DATA_DIR: "file:///data/testbed_system_1/Network/csv"
       entrypoint: 
-        - "/opt/bitnami/spark/bin/spark-submit"
+        - "/opt/spark/bin/spark-submit"
         - "--master"
         - "spark://cis-spark-master:7077"
         - "--conf"
@@ -116,6 +135,7 @@ services:
     cis-ollama:
       image: ollama/ollama:latest
       container_name: cis-ollama
+      profiles: [frontend_ai]
       deploy:
         resources:
           reservations:
@@ -138,6 +158,7 @@ services:
     cis-ollama-pull-models:
       image: ollama/ollama:latest
       container_name: cis-ollama-pull-models
+      profiles: [frontend_ai]
       restart: "no"
       depends_on:
         cis-ollama:
@@ -152,52 +173,78 @@ services:
         - "-lc"
         - "ollama pull llama3.1:8b && ollama pull bge-m3"
     cis-kafka:
-      image: bitnami/kafka:latest
-      container_name: cis-kafka      
+      image: apache/kafka:latest
+      container_name: cis-kafka  
+      profiles: [etl, data_load, machine_learning]
       restart: unless-stopped
       ports:
         - "9092:9092"
       healthcheck:
-        test: ["CMD", "kafka-broker-api-versions.sh", "--bootstrap-server", "cis-kafka:9092"]
+        test: ["CMD", "/opt/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:9092"]
         interval: 30s
         timeout: 10s
         retries: 5
-      environment:        
-          KAFKA_ENABLE_KRAFT: "yes"
-          KAFKA_CFG_NODE_ID: "1"
-          KAFKA_CFG_PROCESS_ROLES: "broker,controller"
-          KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: "1@cis-kafka:9093"
+        start_period: 60s
+      environment:                  
+          KAFKA_NODE_ID: "1"
+          KAFKA_PROCESS_ROLES: "broker,controller"
+          KAFKA_CONTROLLER_QUORUM_VOTERS: "1@cis-kafka:9093"
           
-          KAFKA_CFG_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
-          KAFKA_CFG_ADVERTISED_LISTENERS: "PLAINTEXT://cis-kafka:9092"
-          KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
-          KAFKA_CFG_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
-          KAFKA_CFG_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+          KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+          KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://cis-kafka:9092"
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+          KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+          KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
 
           #TODO: Change as necessary depending on host machine available resources
-          KAFKA_HEAP_OPTIONS: "-Xms6g -Xmx6g"
-          KAFKA_CFG_NUM_NETWORK_THREADS: "6"
-          KAFKA_CFG_NUM_IO_THREADS: "16"
-          KAFKA_CFG_SOCKET_SEND_BUFFER_BYTES: "1048576"
-          KAFKA_CFG_MESSAGE_MAX_BYTES: "2000000"
-          KAFKA_CFG_REPLICA_SOCKET_RECEIVE_BUFFER_BYTES: "1048576"
+          KAFKA_HEAP_OPTS: "-Xms6g -Xmx6g"
+          KAFKA_NUM_NETWORK_THREADS: "6"
+          KAFKA_NUM_IO_THREADS: "16"
+          KAFKA_SOCKET_SEND_BUFFER_BYTES: "1048576"
+          KAFKA_MESSAGE_MAX_BYTES: "2000000"
+          KAFKA_REPLICA_SOCKET_RECEIVE_BUFFER_BYTES: "1048576"
 
-          KAFKA_CFG_DEFAULT_REPLICATION_FACTOR: "1"
-          KAFKA_CFG_OFFSET_TOPIC_REPLICATION_FACTOR: "1"
-          KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
-          KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR: "1"
-
-          KAFKA_CREATE_TOPICS: "Data.Raw.Physical:1:16,Data.Raw.Scada:1:16,Data.Error:1:1,Data.Graphs:1:1, Anomaly.Predict:1:1,Anomaly.Alerts:1:1"          
+          KAFKA_DEFAULT_REPLICATION_FACTOR: "1"
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
       volumes:
-        - "kafka-data:/bitnami"
+        - "kafka-data:/var/lib/kafka/data"
       networks:
         crit_infra_net:
           aliases:
             - cis-kafka
             - kafka    
+    cis-kafka-init-topics:
+      image: apache/kafka:latest
+      container_name: cis-kafka-init-topics
+      profiles: [etl, data_load, machine_learning]
+      restart: "no"
+      depends_on:
+        cis-kafka:
+          condition: service_healthy
+      environment:
+        KAFKA_BOOTSTRAP_SERVERS: "cis-kafka:9092"
+      networks:
+        - crit_infra_net
+      command: >
+        bash -c "
+          echo 'Waiting for Kafka to be ready...'
+          until /opt/kafka/bin/kafka-topics.sh --list --bootstrap-server cis-kafka:9092; do
+            echo '... still waiting for Kafka';
+            sleep 2;
+          done;
+          /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic Data.Raw.Physical --bootstrap-server $$KAFKA_BOOTSTRAP_SERVERS --partitions 16 --replication-factor 1 &&
+          /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic Data.Raw.Scada --bootstrap-server $$KAFKA_BOOTSTRAP_SERVERS --partitions 16 --replication-factor 1 &&
+          /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic Data.Error --bootstrap-server $$KAFKA_BOOTSTRAP_SERVERS --partitions 1 --replication-factor 1 &&
+          /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic Anomaly.Predict --bootstrap-server $$KAFKA_BOOTSTRAP_SERVERS --partitions 16 --replication-factor 1 &&
+          /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic Data.Graphs --bootstrap-server $$KAFKA_BOOTSTRAP_SERVERS --partitions 16 --replication-factor 1 &&
+          /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic Anomaly.Alerts --bootstrap-server $$KAFKA_BOOTSTRAP_SERVERS --partitions 1 --replication-factor 1
+        "
     cis-neo4j:
       image: neo4j:4.4.0-enterprise
       container_name: cis-neo4j
+      # Core infrastructure service, always active
       hostname: cis-neo4j
       restart: unless-stopped
       ports:
@@ -228,6 +275,7 @@ services:
     cis-timescaledb:
       image: timescale/timescaledb:latest-pg14
       container_name: cis-timescaledb
+      # Core infrastructure service, always active
       hostname: timescaledb
       restart: unless-stopped
       ports:
@@ -249,6 +297,7 @@ services:
     cis-rag-anything:
       build: services/rag_anything
       container_name: cis-rag-anything
+      profiles: [frontend_ai]
       restart: unless-stopped
       ports:
         - "8000:8000"
@@ -283,6 +332,7 @@ services:
     cis-test-data-loader:
       build: services/test_data_load
       container_name: cis-test-data-load
+      profiles: [etl, data_load, machine_learning]
       restart: unless-stopped
       ports:
         - "8090:8090"
@@ -301,16 +351,18 @@ services:
         KAFKA_SCADA_TOPIC: "Data.Raw.Scada"
         KAFKA_ANOMALY_TOPIC: "Anomaly.Predict"
         KAFKA_GENERATE_GRAPH_TOPIC: "Data.Graphs"
-        DATA_DIR: "/app/data"
+        DATA_DIR: "/app/exports/data"
         SCHEMA_DIR: "/app/schemas"
       volumes:
         - ./data:/app/data
         - ./schemas:/app/schemas 
+        - ./exports:/app/exports
       networks:
         - crit_infra_net
     cis-dashboard-app:
       build: dashboard_app
       container_name: cis-dashboard-app
+      profiles: [frontend,frontend_ai]
       restart: unless-stopped
       ports:
         - "8050:8050"
@@ -322,6 +374,7 @@ services:
     cis-raw-network-consumer:
       build: ./src/data_ingestion
       container_name: cis-raw-network-consumer
+      profiles: [etl,data_load]
       restart: unless-stopped
       command: python raw_network_consumer.py
       depends_on:
@@ -353,7 +406,8 @@ services:
         - ./schemas:/app/schemas
     cis-raw-physical-consumer:
       build: ./src/data_ingestion
-      container_name: cis-raw-physical-consumer
+      container_name: cis-raw-physical-consumer      
+      profiles: [etl,data_load]
       restart: unless-stopped
       command: python raw_physical_consumer.py
       depends_on:
@@ -380,6 +434,7 @@ services:
     cis-data-error-consumer:
       build: .
       container_name: cis-data-error-consumer
+      profiles: [etl, data_load, machine_learning]
       restart: unless-stopped
       command: python src/data_ingestion/data_error_consumer.py
       depends_on:
@@ -402,6 +457,7 @@ services:
     cis-graph-generator-consumer:
       build: ./src/knowledge_graphs
       container_name: cis-graph-generator-consumer
+      profiles: [etl,data_load]
       restart: unless-stopped
       command: python graph_generator_consumer.py
       depends_on:
@@ -428,6 +484,7 @@ services:
     cis-anomaly-detector-consumer:
       build: ./src/anomalies
       container_name: cis-anomaly-detector-consumer
+      profiles: [machine_learning]
       restart: unless-stopped
       command: python anomaly_consumer.py
       depends_on:
@@ -453,9 +510,11 @@ services:
         - ./src/repositories:/app/repositories
         - './src/models:/app/models'
         - './src/xai:/app/xai'
+        - './exports:/app/exports'
     cis-alerts-consumer:
       build: ./src/alerts
       container_name: cis-alerts-consumer
+      profiles: [machine_learning]
       restart: unless-stopped
       command: python alerts_consumer.py
       depends_on:
@@ -482,6 +541,7 @@ services:
     cis-init-timescaledb:
       build: services/postgres
       container_name: cis-init-timescaledb
+      # Core process helper service, always active
       depends_on:
         cis-timescaledb:
           condition: service_healthy

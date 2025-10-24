@@ -1,10 +1,12 @@
-FROM bitnami/spark:3.5
+FROM apache/spark:3.5.1
 
 USER root
-# Create a named user with the same UID Bitnami often uses (1001)
-RUN useradd -m -u 1001 -s /bin/bash spark || true \
- && mkdir -p /tmp/.ivy2 \
- && chown -R spark:spark /tmp /tmp/.ivy2 /home/spark
+
+
+RUN mkdir -p /home/spark/.ivy2 && chown -R spark:spark /home/spark/.ivy2
+
+WORKDIR /opt/spark/work-dir
 
 ENV JAVA_TOOL_OPTIONS="-Duser.name=spark -Duser.home=/home/spark"
+
 USER spark
