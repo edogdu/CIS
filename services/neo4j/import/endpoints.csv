@@ -1,8 +1,3 @@
-endpoint_id,system_id,ip,cidr,mac,asset_id,first_seen_ts,last_seen_ts,validated
-testbed_system_1_PLC_PLC_1_84.3.251.18,testbed_system_1,84.3.251.18,17,,testbed_system_1_PLC_PLC_1,2025-09-26 02:30:43.642772+00:00,2025-09-26 02:30:43.642772+00:00,True
-testbed_system_1_PLC_PLC_2_84.3.251.101,testbed_system_1,84.3.251.101,17,,testbed_system_1_PLC_PLC_2,2025-09-26 02:30:43.648782+00:00,2025-09-26 02:30:43.648782+00:00,True
-testbed_system_1_PLC_PLC_3_84.3.251.102,testbed_system_1,84.3.251.102,17,,testbed_system_1_PLC_PLC_3,2025-09-26 02:30:43.654237+00:00,2025-09-26 02:30:43.654237+00:00,True
-testbed_system_1_PLC_PLC_4_84.3.251.103,testbed_system_1,84.3.251.103,17,,testbed_system_1_PLC_PLC_4,2025-09-26 02:30:43.658066+00:00,2025-09-26 02:30:43.658066+00:00,True
-testbed_system_1_HMI_HMI_1_84.3.251.20,testbed_system_1,84.3.251.20,17,,testbed_system_1_HMI_HMI_1,2025-09-26 02:30:43.662685+00:00,2025-09-26 02:30:43.662685+00:00,True
-testbed_system_1_Flow Sensor_Flow_sensor_1_84.3.251.104,testbed_system_1,84.3.251.104,17,,testbed_system_1_Flow Sensor_Flow_sensor_1,2025-09-26 02:30:43.671525+00:00,2025-09-26 02:30:43.671525+00:00,True
-testbed_system_1_Flow Sensor_Flow_sensor_2_84.3.251.105,testbed_system_1,84.3.251.105,17,,testbed_system_1_Flow Sensor_Flow_sensor_2,2025-09-26 02:30:43.677412+00:00,2025-09-26 02:30:43.677412+00:00,True
+version https://git-lfs.github.com/spec/v1
+oid sha256:8b638c92eb72df4ac6cd6d2d1fecdfa7335c28a88723e40892ce23b1d3ba9674
+size 1352

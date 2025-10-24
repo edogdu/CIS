@@ -192,21 +192,23 @@ def send_to_kafka(df, topic):
     .save()
     print("complete...")
 
-def convert_phys_utf16_to_utf8():
-    print("converting to utf-8...")
-    path = f"{phys_utf16_data_path}/*.csv"
-    print(f"looking for files in path: {path}")
-    files = glob.glob(path)
-    print(f"found {len(files)} files to convert...")
-    for filename in files:        
-        print(f"processing file: {filename}")
-        src = f"{phys_utf16_data_path}/{os.path.basename(filename)}"
-        dest = f"{phys_utf16_data_dest_path}/{os.path.basename(filename)}"
-        with open(src, "r", encoding="utf-16") as fsrc:
-            with open(dest, "w", encoding="utf-8") as fdest:
-                print(f"writing to file: {dest}")
-                for line in fsrc:
-                    fdest.write(line)
+# Utility function to convert UTF-16 encoded files to UTF-8
+# Uncomment and run this function if you have UTF-16 files to convert
+# def convert_phys_utf16_to_utf8():
+#     print("converting to utf-8...")
+#     path = f"{phys_utf16_data_path}/*.csv"
+#     print(f"looking for files in path: {path}")
+#     files = glob.glob(path)
+#     print(f"found {len(files)} files to convert...")
+#     for filename in files:        
+#         print(f"processing file: {filename}")
+#         src = f"{phys_utf16_data_path}/{os.path.basename(filename)}"
+#         dest = f"{phys_utf16_data_dest_path}/{os.path.basename(filename)}"
+#         with open(src, "r", encoding="utf-16") as fsrc:
+#             with open(dest, "w", encoding="utf-8") as fdest:
+#                 print(f"writing to file: {dest}")
+#                 for line in fsrc:
+#                     fdest.write(line)
         
 
 if __name__ == "__main__":
@@ -214,17 +216,14 @@ if __name__ == "__main__":
     try:
         #network
         network_df = spark.read.csv(f"{network_data_path}/*.csv"
-                                    ,header=True
-                                    ,schema=network_data_schema
-                                    ,nullValue="NaN")
+                                   ,header=True
+                                   ,schema=network_data_schema
+                                   ,nullValue="NaN")
         final_network_df = preprocess_network_data(network_df)
         send_to_kafka(final_network_df, network_topic)
         print("Network data load complete.")
 
-        #physical
-        # TODO: Need to fix mapping before uncommenting and loading physical data
-        convert_phys_utf16_to_utf8()
-        
+        #physical       
         phys_df_utf8 = spark.read.options(delimiter="\t", header=True, schema=phys_data_schema, nullValue="NaN", encoding="UTF-8").csv(f"{phys_data_path}/phy_*.csv")
         final_utf8phys_df = preprocess_phys_data(phys_df_utf8)
         #print(f"final_utf8phys_df: {final_utf8phys_df.take(100)}")
