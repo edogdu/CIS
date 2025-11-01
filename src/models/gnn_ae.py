@@ -178,8 +178,8 @@ class GNNAEModelRunner(ModelRunner):
         # Now calculate snapshot threshold as well
         snapshot_thresholds = []
         for probs in all_probs:
-            anomaly_indices = (probs < self.edge_threshold).to(torch.int32)
-            snapshot_anomaly_ratio = float(anomaly_indices / probs.numel())
+            anomaly_indices = (probs < self.edge_threshold).nonzero(as_tuple=False).view(-1)
+            snapshot_anomaly_ratio = float(anomaly_indices.numel() / probs.numel())
             snapshot_thresholds.append(snapshot_anomaly_ratio)
         
         all_snapshot_thresholds_tensor = torch.tensor(snapshot_thresholds)
