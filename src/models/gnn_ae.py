@@ -9,6 +9,9 @@ import torch.nn.functional as F
 from torch_geometric.utils import negative_sampling
 from torch_geometric.transforms import RandomLinkSplit
 from typing import List, Dict, Any, Tuple
+import os
+import pandas as pd        
+import datetime
 
 modelrunner_log = logging.getLogger("models_runner")
 
@@ -36,25 +39,30 @@ class GNNAEModelRunner(ModelRunner):
     """Graph Neural Network Autoencoder model implementation."""
     
 
-    def __init__(self, xai_runner: XaiExplainer, input_dim:int, hidden_dim:int, output_dim:int, config:dict, device: torch.device | str | None = None):        
+    def __init__(self, xai_runner: XaiExplainer, input_dim:int, hidden_dim:int, output_dim:int, config:dict, device: torch.device | str | None = None, edge_threshold: float | None = None, snapshot_threshold: float | None = None):        
         self.xai_runner = xai_runner
         self.config = config
         self.device = device if device else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.output_dim = output_dim
         self.model = None
         self.optimizer = None
         self.scheduler = None
+        #self.set_seed(42)
+        self.edge_threshold = edge_threshold
+        self.snapshot_threshold = snapshot_threshold
         modelrunner_log.info(f"Using device: {self.device}")    
         modelrunner_log.info(f"Model config: {config}")
         modelrunner_log.info(f"Input dim: {input_dim}, Hidden dim: {hidden_dim}, Output dim: {output_dim}")
-        self.config = {
+        self.config.update({
             "learning_rate": config.get("learning_rate", 0.01),
             "weight_decay": config.get("weight_decay", 5e-4),
             "epochs": config.get("epochs", 200),
             "dropout": config.get("dropout", 0.5),
             "xai_topk": config.get("xai_topk", 20),
             "xai_loss_min": config.get("xai_loss_min", None)
-        }
+        })
 
         self.init_model(input_dim, hidden_dim, output_dim)
         
@@ -151,6 +159,36 @@ class GNNAEModelRunner(ModelRunner):
         loss = pos_loss.mean() + neg_loss.mean()
         return loss, pos_loss.detach(), neg_loss.detach(), neg_edge_index
 
+    def determine_anomaly_thresholds(self, edge_percentile: float=0.05, snapshot_percentile: float=0.05):
+        """Determine anomaly detection threshold based on reconstruction errors.  We will use percentile to determine where
+        to set the threshold. 0.05 means we set the threshold so that 5% of the edges with the lowest reconstruction scores are considered anomalies."""
+        logging.info(f"Determining anomaly detection threshold at edge:{edge_percentile}, snapshot:{snapshot_percentile}...")
+        all_probs = []
+        edge_counts = []
+        for i, d in enumerate(self.train_set):
+            probs = self.predict(d)            
+            all_probs.append(probs)
+            edge_counts.append(probs.numel())
+            logging.info(f"Processed training graph #{i} with {probs.numel()} edges for threshold determination.")
+        all_probs_tensor = torch.cat(all_probs)
+        edge_threshold_value = torch.quantile(all_probs_tensor, edge_percentile)
+        self.edge_threshold = edge_threshold_value.mean().item()
+        modelrunner_log.info(f"Determined anomaly detection edge threshold at {edge_percentile}: {self.edge_threshold}")
+
+        # Now calculate snapshot threshold as well
+        snapshot_thresholds = []
+        for probs in all_probs:
+            anomaly_indices = (probs < self.edge_threshold).to(torch.int32)
+            snapshot_anomaly_ratio = float(anomaly_indices / probs.numel())
+            snapshot_thresholds.append(snapshot_anomaly_ratio)
+        
+        all_snapshot_thresholds_tensor = torch.tensor(snapshot_thresholds)
+        snapshot_threshold = torch.quantile(all_snapshot_thresholds_tensor, snapshot_percentile)
+        self.snapshot_threshold = snapshot_threshold.mean().item()
+        modelrunner_log.info(f"Determined anomaly detection snapshot threshold at {snapshot_percentile}: {self.snapshot_threshold}")
+
+        return self.edge_threshold, self.snapshot_threshold
+
     def generate_neg_edge_index(self, pos_edge_index, num_nodes):
         neg_edge_index = negative_sampling(
             edge_index=pos_edge_index, 
@@ -184,7 +222,7 @@ class GNNAEModelRunner(ModelRunner):
                 'val_ap': val_metrics[1] if val_metrics else None
             })
         return history
-    
+
     def evaluate_set(self, eval_set: List) -> Tuple[float, float]:
         """Evaluate the model on a given dataset."""
         if not eval_set:
@@ -236,13 +274,45 @@ class GNNAEModelRunner(ModelRunner):
     
     def predict(self, data) -> torch.Tensor:
         """Make predictions using the trained GNN Autoencoder."""
+        logging.info(f"Starting Prediction...")
         self.model.eval()
         with torch.no_grad():
             x = data.x.to(self.device)
             edge_index = data.edge_index.to(self.device)
             z = self.model.encode(x, edge_index)
-            return z.detach().cpu()
+            edge_scores = self.model.decoder(z, edge_index)
+            #logging.info(f"Edge scores: {edge_scores}")
+            a = torch.sigmoid(edge_scores).cpu()
+            #logging.info(f"Processed edge scores: {a}")
+            return a
+    
+    def detect_anomalies(self, data, threshold: float=0.65) -> List[Tuple[int, int]]:
+        """Detect anomalies in the graph based on edge reconstruction scores."""
+        scores = self.predict(data)
+        anomaly_indices = (scores < self.edge_threshold).nonzero(as_tuple=False).view(-1)
+        snapshot_anomaly_ratio = float(anomaly_indices.numel() / scores.numel())
+        modelrunner_log.info(f"Snapshot anomaly ratio: {snapshot_anomaly_ratio}, Snapshot threshold: {self.snapshot_threshold}")
+        if snapshot_anomaly_ratio < self.snapshot_threshold:
+            return []
+        anomalies = []        
 
+        for idx in anomaly_indices.tolist():
+            u = data.edge_index[0, idx].item()
+            v = data.edge_index[1, idx].item()
+            anomaly_score = scores[idx].item()
+            modelrunner_log.info(f"Detected anomaly on edge ({u}, {v}) with score {anomaly_score}")
+            anomalies.append({
+                'src_tensorid': u,
+                'dst_tensorid': v,
+                'anomaly_score': anomaly_score
+            })
+        return anomalies
+
+    def save_anomalies_csv(self, system_id, model_name, anomalies: List[Tuple[int, int]], path: str):
+        """Save detected anomalies to a CSV file."""
+        df = pd.DataFrame(anomalies)
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        df.to_csv(os.path.join(path, f"{system_id}_{model_name}_anomalies_{ts}.csv"), index=False)
 
     def explain(self, data, topk: int | None = None, z:torch.Tensor | None =None):
         """Explain the model's predictions using XAI techniques."""
@@ -317,9 +387,7 @@ class GNNAEModelRunner(ModelRunner):
         return results
     def save_explain_csv(self, system_id, model_name, explanations: List[Dict[str, Any]], path: str):
         """Save explanations to a CSV file."""
-        import pandas as pd
-        import os
-        import datetime
+        
         rows = []
         for exp in explanations:
             edge = exp.get('edge_index', (-1, -1))
@@ -336,15 +404,45 @@ class GNNAEModelRunner(ModelRunner):
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         df.to_csv(os.path.join(path, f"{system_id}_{model_name}_explanations_{ts}.csv"), index=False)
 
-    def save_model(self, path: str):
+    def save_model(self, path: str=None):
         """Save the trained model to the specified path."""
-        torch.save(self.model.state_dict(), path)
+        if path is None:
+            path = os.path.join(self.config.get("export_path"), f"{self.config.get('system_id')}_{self.config.get('model_type')}_{self.config.get('bucket_duration')}s.pt")
+        logging.info(f"Saving model to: {path}")
+        model_values = {
+            "edge_threshold": self.edge_threshold,
+            "snapshot_threshold": self.snapshot_threshold,
+            "state_dict": self.model.state_dict(),
+            "config": self.config,           
+            "input_dim": self.input_dim,
+            "hidden_dim": self.hidden_dim,
+            "output_dim": self.output_dim,
+            "device": self.device
 
-    def load_model(self, path: str):
+        }
+
+        torch.save(model_values, path)
+    
+    @staticmethod
+    def load_model(config: dict, path: str=None) -> 'GNNAEModelRunner':
         """Load a trained model from the specified path."""
-        self.model.load_state_dict(torch.load(path))
-        self.model.to(self.device)
-
+        if path is None:
+            path = f'{config.get("export_path")}/{config.get("system_id")}_{config.get("model_type")}_{config.get("bucket_duration")}s.pt'
+        model_values = torch.load(path)
+        model_runner = GNNAEModelRunner(
+            xai_runner=None, # TODO: Load or pass appropriate XAI runner
+            input_dim=model_values.get("input_dim"),
+            hidden_dim=model_values.get("hidden_dim"),
+            output_dim=model_values.get("output_dim"),
+            config=model_values.get("config"),
+            device=model_values.get("device"),
+            edge_threshold=model_values.get("edge_threshold"),
+            snapshot_threshold=model_values.get("snapshot_threshold")
+        )
+        model_runner.model.load_state_dict(model_values.get("state_dict"))
+        model_runner.model.to(model_runner.device)        
+        return model_runner
+    
     def evaluate(self, data):
         """Evaluate the model's performance on the provided data."""
         self.model.eval()
@@ -395,9 +493,6 @@ class GNNAEModelRunner(ModelRunner):
     @staticmethod
     def save_test_csv(system_id, model_name, test_results: List[Dict[str, Any]], path: str):
         """Save test results to a CSV file."""
-        import pandas as pd
-        import os
-        import datetime
         df = pd.DataFrame(test_results)
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         df.to_csv(os.path.join(path, f"{system_id}_{model_name}_test_results_{ts}.csv"), index=False)
@@ -405,9 +500,6 @@ class GNNAEModelRunner(ModelRunner):
     @staticmethod
     def save_history_csv(system_id, model_name, history: List[Dict[str, Any]], path: str):
         """Save training history to a CSV file."""
-        import pandas as pd
-        import os
-        import datetime
         df = pd.DataFrame(history)
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         df.to_csv(os.path.join(path, f"{system_id}_{model_name}_history_{ts}.csv"), index=False)

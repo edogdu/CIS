@@ -4,4 +4,5 @@ aiokafka
 python-dotenv
 pydantic
 pandas
-psycopg[binary]>=3.2
+psycopg[binary,pool]>=3.2
+neo4j

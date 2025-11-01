@@ -11,6 +11,7 @@ from psycopg import sql, connect
 from schemas.DetectAnomalyRequest import DetectAnomalyRequest
 from schemas.XaiTypes import XaiTypes
 from fastapi.responses import RedirectResponse
+from repositories.persistence.anomaly import AnomalyRepository
 
 app = FastAPI()
 kafka_bootstrap_servers = os.getenv('KAFKA_BOOTSTRAP_SERVERS','kafka:9092')
@@ -55,6 +56,8 @@ async def export_aggregate_data():
             query = f"SELECT * FROM {table} ORDER BY bucket;"
             df = pd.read_sql_query(query, conn)
             df.to_csv(f"{data_dir}/{table}.csv",index=False)
+
+@app.get("/export_sys_config")
 async def export_sys_config():
     with connect() as conn:            
         q1 = "SELECT * FROM assets"
@@ -68,6 +71,29 @@ async def export_sys_config():
 
         df = pd.read_sql_query(q3, conn)
         df.to_csv(f"{data_dir}/measurement_types.csv",index=False)
+
+@app.post("/export_anomaly_data")
+async def export_anomaly_data(request: DetectAnomalyRequest):
+    data = await AnomalyRepository().get_anomaly_results(request.system_id, request.duration, request.start_time, request.end_time)
+    df = pd.DataFrame(data, columns=['is_true_negative', 'is_true_positive', 'is_false_positive', 'is_false_negative', 'bucket', 'system_id', 'duration', 'num_attacks', 'snapshot_id', 'anomaly_score'])
+    df.to_csv(f"{data_dir}/anomaly_results_{request.system_id}_{request.duration}s_{request.start_time}_{request.end_time}.csv",index=False)
+    metrics = {        
+        "TF": float(df['is_true_negative'].sum()),
+        "TP": float(df['is_true_positive'].sum()),
+        "FP": float(df['is_false_positive'].sum()),
+        "FN": float(df['is_false_negative'].sum()),
+        "Precision": 0,
+        "Recall": 0,
+        "F1-Score": 0,
+        "Accuracy": (float(df['is_true_positive'].sum()) + float(df['is_true_negative'].sum())) / len(df) if len(df) > 0 else 0
+    }
+
+    metrics["Precision"] = metrics["TP"] / (metrics["TP"] + metrics["FP"]) if (metrics["TP"] + metrics["FP"]) > 0 else 0
+    metrics["Recall"] = metrics["TP"] / (metrics["TP"] + metrics["FN"]) if (metrics["TP"] + metrics["FN"]) > 0 else 0
+    metrics["F1-Score"] = 2 * (metrics["Precision"] * metrics["Recall"]) / (metrics["Precision"] + metrics["Recall"]) if (metrics["Precision"] + metrics["Recall"]) > 0 else 0
+
+
+    return metrics
 
 @app.get("/refresh_materialized_views")
 async def refresh_materialized_views():

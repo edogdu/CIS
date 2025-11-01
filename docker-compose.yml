@@ -178,9 +178,9 @@ services:
       profiles: [etl, data_load, machine_learning]
       restart: unless-stopped
       ports:
-        - "9092:9092"
+        - "29092:29092"
       healthcheck:
-        test: ["CMD", "/opt/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:9092"]
+        test: ["CMD", "/opt/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:29092"]
         interval: 30s
         timeout: 10s
         retries: 5
@@ -190,9 +190,9 @@ services:
           KAFKA_PROCESS_ROLES: "broker,controller"
           KAFKA_CONTROLLER_QUORUM_VOTERS: "1@cis-kafka:9093"
           
-          KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
-          KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://cis-kafka:9092"
-          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+          KAFKA_LISTENERS: "PLAINTEXT_HOST://:29092,PLAINTEXT://:9092,CONTROLLER://:9093"
+          KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://cis-kafka:9092,PLAINTEXT_HOST://localhost:29092"
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT"
           KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
           KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
 
@@ -260,11 +260,15 @@ services:
         NEO4J_apoc_import_file_use_neo4j_config: "true"
         NEO4J_dbms_security_allow_csv_import_from_file_urls: "true"
         NEO4J_apoc_initializer_cypher: "CALL apoc.cypher.runFiles(['file:///init.cypher'])"
-        NEO4J_dbms_jvm_additional: "-XX:-UseContainerSupport"
+        NEO4J_dbms_memory_heap_initial__size: "4G"
+        NEO4J_dbms_memory_heap_max__size: "8G"
+        NEO4J_dbms_memory_pagecache_size: "4G"
+        NEO4J_dbms_jvm_additional: >-
+          -XX:+UseContainerSupport
         NEO4J_dbms_connector_http_listen__address: ":7485"
         NEO4J_dbms_connector_bolt_listen__address: ":7698"
         NEO4J_dbms_connector_http_advertised_address: "localhost:7485"
-        NEO4J_dbms_connector_bolt_advertised_address: "localhost:7698"
+        NEO4J_dbms_connector_bolt_advertised_address: "localhost:7698"        
         NEO4J_apoc_jdbc_postgres_url: >
           jdbc:postgresql://timescaledb:5432/?user=&password=password&sslmode=disable
       volumes:
@@ -346,6 +350,9 @@ services:
         PGPASSWORD: "password"
         PGDATABASE: "anomalydetection"
         PGSSLMODE: "disable"
+        PG_DSN: "postgresql://postgres:password@timescaledb:5432/anomalydetection?sslmode=disable"
+        PG_MIN_SIZE: 1
+        PG_MAX_SIZE: 5
         KAFKA_BOOTSTRAP_SERVERS: "cis-kafka:9092"
         KAFKA_PHYS_TOPIC: "Data.Raw.Physical"
         KAFKA_SCADA_TOPIC: "Data.Raw.Scada"
@@ -357,6 +364,10 @@ services:
         - ./data:/app/data
         - ./schemas:/app/schemas 
         - ./exports:/app/exports
+        - ./src/repositories:/app/repositories
+        - ./src/factories:/app/factories
+        - ./src/models:/app/models
+        - ./src/xai:/app/xai
       networks:
         - crit_infra_net
     cis-dashboard-app:
@@ -510,7 +521,7 @@ services:
         - ./src/repositories:/app/repositories
         - './src/models:/app/models'
         - './src/xai:/app/xai'
-        - './exports:/app/exports'
+        - './exports:/app/exports'        
     cis-alerts-consumer:
       build: ./src/alerts
       container_name: cis-alerts-consumer

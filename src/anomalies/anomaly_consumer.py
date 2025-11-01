@@ -12,6 +12,7 @@ from factories.models import ModelRepositoryFactory
 from schemas.ModelTypes import ModelTypes
 from schemas.XaiTypes import XaiTypes
 from repositories.graphs.pyg_builder import to_pyg_data, global_schema
+from repositories.persistence.anomaly import AnomalyRepository
 
 SEM = asyncio.Semaphore(2)  # limit to 2 concurrent processing
 
@@ -63,7 +64,12 @@ async def _process_request(request: DetectAnomalyRequest):
         "test_frac": 0.1,
         "is_undirected": True,
         "xai_topk": 20,
-        "xai_loss_min": None
+        "xai_loss_min": None,
+        "export_path": "./exports/models",
+        "bucket_duration": request.duration,
+        "system_id": request.system_id,
+        "model_type": request.model_type.value,
+        "xai_type": request.xai_type.value if request.xai_type else XaiTypes.NONE.value,
     }
     if request.model_config:
         config.update(request.model_config)
@@ -94,22 +100,79 @@ async def _process_request(request: DetectAnomalyRequest):
                                             request.model_type.value,
                                             train_loss,
                                             './logs')
+            edge_percentile = request.edge_threshold_percent if request.edge_threshold_percent else 0.05
+            snapshot_percentile = request.snapshot_threshold_percent if request.snapshot_threshold_percent else 0.01
+            log.info(f"Determining anomaly thresholds at edge percentile: {edge_percentile}, snapshot percentile: {snapshot_percentile}")
+            model_runner.determine_anomaly_thresholds(edge_percentile=edge_percentile, snapshot_percentile=snapshot_percentile)
             results = model_runner.evaluate_test()
             log.info(f"Evaluation results: {results}")
             model_runner.save_test_csv(request.system_id,
                                         request.model_type.value,
                                         results,
                                         './logs')
-            model_runner.save_model(f'./models/{request.system_id}_{request.model_type.value}_{request.duration}s.pt')
-            for data in dataset:
-                log.info(f"Explaining data with {data.num_nodes} nodes and {data.num_edges} edges")
-                model_runner.explain(data, topk=config.get('xai_topk', 20))
+            model_runner.save_model()
+            #for data in dataset:
+            #    log.info(f"Explaining data with {data.num_nodes} nodes and {data.num_edges} edges")
+            #    model_runner.explain(data, topk=config.get('xai_topk', 20))
+        elif request.is_threshold_only:
+            log.info(f"Loading model for threshold determination: {request.model_type}")
+            model_runner = ModelRepositoryFactory.get_model_runner(
+            model_type=request.model_type,                    
+            input_dim=dataset[0].num_node_features,
+            hidden_dim=16,
+            output_dim=16,
+            xai_type=request.xai_type,
+            device=None,
+            config=config,
+            load_from_path=True
+            )
+            model_runner.prepare_splits(dataset)
+            log.info("Model loaded, determining thresholds")
+            model_runner.determine_anomaly_thresholds(edge_percentile=request.edge_threshold_percent, snapshot_percentile=request.snapshot_threshold_percent)
+            model_runner.save_model()
+            results = {
+                "edge_threshold": model_runner.edge_threshold,
+                "snapshot_threshold": model_runner.snapshot_threshold
+            }
+            log.info(f"Determined thresholds: {results}")
         else:
             log.info(f"Loading model for inference: {request.model_type}")
-            model_runner.load_model(f'./models/{request.system_id}_{request.model_type.value}_{request.duration}s.pt')
+            model_runner = ModelRepositoryFactory.get_model_runner(
+            model_type=request.model_type,                    
+            input_dim=dataset[0].num_node_features,
+            hidden_dim=16,
+            output_dim=16,
+            xai_type=request.xai_type,
+            device=None,
+            config=config,
+            load_from_path=True
+            )
             log.info("Model loaded, starting inference")
-            results = model_runner.predict(dataset)
-            log.info(f"Inference results: {results}")
+            anomalies = []
+            for i, data in enumerate(dataset):
+                log.info(f"Processing graph #{i} (Snapshot ID: {getattr(data, 'snapshot_id', 'N/A')}) for anomalies...")
+                data_anomalies = model_runner.detect_anomalies(data)
+                if data_anomalies:
+                    log.info(f"Detected anomalies for snapshot ID: {getattr(data, 'snapshot_id', 'N/A')}")
+                    tensorid_to_graphid = getattr(data, 'tensorid_to_graphid', {})
+                    for anomaly in data_anomalies:
+                        anomaly['snapshot_id'] = getattr(data, 'snapshot_id', 'N/A')
+                        anomaly['src_graph_id'] = tensorid_to_graphid.get(anomaly['src_tensorid'], anomaly['src_tensorid'])
+                        anomaly['dst_graph_id'] = tensorid_to_graphid.get(anomaly['dst_tensorid'], anomaly['dst_tensorid'])
+                    anomalies.extend(data_anomalies)
+            #log.info(f"Anomalies detected: {anomalies}")
+            if anomalies:
+                await AnomalyRepository().save_anomalies(request.system_id,
+                                                         request.model_type.value,
+                                                         request.duration,                                                         
+                                                        anomalies)
+                model_runner.save_anomalies_csv(request.system_id,
+                                            request.model_type.value,
+                                            anomalies,
+                                            './logs')
+            results = anomalies
+        return results
+
     elif request.model_type == ModelTypes.XGBOOST:
         raise NotImplementedError("XGBoost model runner not implemented yet")
     

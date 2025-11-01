@@ -5,14 +5,14 @@ import torch
 from typing import Tuple, Dict, Any, List, Optional
 import logging
 
-data_builder_log = logging.getLogger("data_builder")
+logger = logging.getLogger("data_builder")
 global_schema = {
     'property_keys': [
         # Network properties
-        "avg_size", "destination_port", "destination_total_packets", "duration",
-        "max_size", "min_size", "num_connections", "source_port", "source_total_packets",
+        "avg_size", "destination_port", "destination_total_packets",
+         "num_connections", "source_port", "source_total_packets",
         # Asset properties
-        "avg_val", "max_val", "min_val", "num_measurements"
+        "avg_val", "num_measurements"
     ],
     # Node Labels - used for node type one-hot encoding
     'label_space': ["Endpoint", "Asset", "Connection", "Measurement"],
@@ -21,11 +21,15 @@ global_schema = {
         'protocol': ["TCP", "UDP", "ICMP", "HTTP", "HTTPS", "OTHER"],
         'asset_type': ["HMI", "PLC", "Pump", "Valv", "Flow Sensor", "Tank", "PressureSensor"],
         'measurement_type': ["state", "pressure", "val"],
+        'destination_port': ["well_known", "registered", "ephemeral", "other" ], # well-known: 0-1023, registered: 1024-49151, ephemeral: 49152-65535
+        'source_port': ["well_known", "registered", "ephemeral", "other" ],
     },
     # feature toggles
     "use_ip_features": True,
     "ip_hash_buckets": 0,
 }
+
+
 
 @dataclass
 class FeatureLayout:
@@ -104,6 +108,18 @@ def ip_to_onehot_features(ip: str, buckets: int) -> list[float]:
     features[index] = 1.0
     return features
 
+def map_port_to_category(port: Optional[int]) -> Optional[str]:
+    if port is None:
+        return None
+    if 0 <= port <= 1023:
+        return "well_known"
+    elif 1024 <= port <= 49151:
+        return "registered"
+    elif 49152 <= port <= 65535:
+        return "ephemeral"
+    else:
+        return "other"
+
 def mac_to_features(mac: str) -> list[float]:
     if mac is None:
         return [0.0] * 6
@@ -164,7 +180,7 @@ def fill_categorical_features(feature_tensor: torch.Tensor, tensor_row: int, lay
     for k, c in layout.categorical_mappings.items():
         offset, width = layout.categorical_offsets[k]
         val = properties.get(k)
-        val = val if isinstance(val, str) and val in c else ("OTHER" if "OTHER" in c else None)
+        val = val if isinstance(val, str) and val in c else map_port_to_category(val) if k in ['source_port', 'destination_port'] else ("OTHER" if "OTHER" in c else None)
         if val is not None:
             j = c.index(val)
             feature_tensor[tensor_row, offset + j] = 1.0
@@ -253,10 +269,11 @@ def to_pyg_data(snapshot: dict, schema: Dict[str, Any] = None) -> Data:
     # Convert the snapshot data into PyG Data format
     nodes = snapshot.get('nodes', [])
     edges = snapshot.get('relationships', [])
+    logger.info(f"Converting snapshot {snapshot.get('snapshot_id')} with {len(nodes)} nodes and {len(edges)} edges to PyG Data.")
 
     x, edge_index = map_to_features(nodes, edges, schema)
-    
-    data_builder_log.info(f"Built features with shape: {x.shape}, edge_index shape: {edge_index.shape}")
+
+    logger.info(f"Built features with shape: {x.shape}, edge_index shape: {edge_index.shape}")
 
     data = Data(x=x, edge_index=edge_index)
     #data.pos_edge_label_index = edge_index
