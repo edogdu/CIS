@@ -11,9 +11,12 @@ from factories.data import DataFactory
 from factories.models import ModelRepositoryFactory
 from schemas.ModelTypes import ModelTypes
 from schemas.XaiTypes import XaiTypes
-from repositories.graphs.pyg_builder import to_pyg_data, global_schema
+from repositories.graphs.pyg_builder import to_pyg_data, global_schema, ylabel_to_index, index_to_ylabel, y_labels
 from repositories.persistence.anomaly import AnomalyRepository
-
+import torch
+from models.gnn import GNNClassifierModel, build_data_loaders, evaluate_model, fit_model, test_model, validate_dataset_integrity
+import numpy as np
+logging.info("Imported y_labels in anomaly_consumer.py: %s", y_labels)
 SEM = asyncio.Semaphore(2)  # limit to 2 concurrent processing
 
 schema_dir = os.getenv('SCHEMA_DIR','/app/schemas')
@@ -27,10 +30,12 @@ kafka_scada_topic = os.getenv('KAFKA_TOPIC', 'Anomaly.Predict')
 
 def _snapshots_to_dataset(snapshots):
     dataset = []
+    write_name = True
     for snapshot in snapshots:
         try:
-            pyg_data = to_pyg_data(snapshot, schema=global_schema)
+            pyg_data = to_pyg_data(snapshot, schema=global_schema, write_name=write_name)
             dataset.append(pyg_data)
+            write_name = False  # only write feature names once
         except Exception as e:
             log.error(f"Error converting snapshot to PyG data: {e}")
     return dataset
@@ -40,6 +45,64 @@ async def handle_message(request):
         await _process_request(request)
 
 async def _process_request(request: DetectAnomalyRequest):
+    """Train model based on src/models/gnn.py GNNAnomalyDetector class which uses GNNModel"""
+    # get all snapshots
+    snapshots = await SnapshotRepository.get_all_snapshots(request.duration, request.system_id)
+
+    # Convert each snapshot to PyG data
+    temp_data = _snapshots_to_dataset(snapshots)
+    dataset = []
+    y_counts = np.zeros(len(y_labels), dtype=int)
+
+    for data in temp_data:
+
+        # get y Labels from AggregateRepository
+        log.info(f"Getting labels for snapshot ID: {data.snapshot_id}")
+        labels = await AggregateRepository.get_labels_for_snapshot(data.snapshot_id, request.system_id, request.duration)
+        log.info(f"Snapshot ID: {data.snapshot_id} has labels: {labels}")
+
+        is_normal = all(label.lower() == 'normal' for label in labels)
+        i = ylabel_to_index('normal') if is_normal else ylabel_to_index('anomaly')
+        data.y = torch.tensor([i], dtype=torch.float32)
+        y_counts[i] += 1
+        dataset.append(data)
+
+    validate_dataset_integrity(dataset)
+    log.info(f"Prepared dataset with {len(dataset)} graphs")
+    log.info(f"Label distribution: " + ", ".join([f"{index_to_ylabel(i)}: {count}" for i, count in enumerate(y_counts)]))
+    config = {
+        "hidden_dim": 92,
+        "dropout": 0.7,
+        "learning_rate": 3e-4,
+        "weight_decay": 0.001,
+        "early_stopping_patience": 15,
+        "early_stopping_min_delta": 0.0001,
+        "max_epochs": 20,
+    }
+
+    # create model object
+    #self, config: Dict[str, Any], in_channels: int=51, out_channels: int=6
+    model = GNNClassifierModel(config=config,
+                               in_channels=dataset[0].num_node_features)
+    
+    # split dataset into train/val/test
+    train_loader, val_loader, test_loader = build_data_loaders(dataset)
+    
+
+    # train model
+    model, criterion, metrics = fit_model(model, train_loader, val_loader, config)
+
+    # validate model
+    val_metrics = evaluate_model(model, val_loader, criterion)
+    log.info(f"Validation Metrics: {val_metrics}")
+
+    # test model
+    test_metrics = test_model(model, test_loader, criterion)
+    log.info(f"Test Metrics: {test_metrics}")
+    # persist results to export folder for analysis as csv file
+
+
+async def _process_request_OLD(request: DetectAnomalyRequest):
     # run in a new thread to avoid blocking        
     snapshots = []
     if request.snapshot_id and request.snapshot_id.strip() != "":

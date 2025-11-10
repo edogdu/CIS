@@ -92,9 +92,6 @@ async def export_anomaly_data(request: DetectAnomalyRequest):
     metrics["Recall"] = metrics["TP"] / (metrics["TP"] + metrics["FN"]) if (metrics["TP"] + metrics["FN"]) > 0 else 0
     metrics["F1-Score"] = 2 * (metrics["Precision"] * metrics["Recall"]) / (metrics["Precision"] + metrics["Recall"]) if (metrics["Precision"] + metrics["Recall"]) > 0 else 0
 
-
-    return metrics
-
 @app.get("/refresh_materialized_views")
 async def refresh_materialized_views():
     for table in aggregate_table_names:

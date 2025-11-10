@@ -11,10 +11,10 @@ RUN apt-get update && apt-get install -y \
     
 WORKDIR /app
 
-COPY requirements.txt .
-
 RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
-            
+RUN pip install torch-geometric
+
+COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
