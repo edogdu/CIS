@@ -11,11 +11,13 @@ from factories.data import DataFactory
 from factories.models import ModelRepositoryFactory
 from schemas.ModelTypes import ModelTypes
 from schemas.XaiTypes import XaiTypes
-from repositories.graphs.pyg_builder import to_pyg_data, global_schema, ylabel_to_index, index_to_ylabel, y_labels
+from repositories.graphs.pyg_builder import to_pyg_data, global_schema, to_pyg_hetero_data, ylabel_to_index, index_to_ylabel, y_labels, write_hetero_feature_mappings
 from repositories.persistence.anomaly import AnomalyRepository
 import torch
 from models.gnn import GNNClassifierModel, build_data_loaders, evaluate_model, fit_model, test_model, validate_dataset_integrity
 import numpy as np
+import models.gnn_het as gnn_het
+
 logging.info("Imported y_labels in anomaly_consumer.py: %s", y_labels)
 SEM = asyncio.Semaphore(2)  # limit to 2 concurrent processing
 
@@ -35,16 +37,109 @@ def _snapshots_to_dataset(snapshots):
         try:
             pyg_data = to_pyg_data(snapshot, schema=global_schema, write_name=write_name)
             dataset.append(pyg_data)
+            if write_name:
+                write_hetero_feature_mappings(pyg_data, snapshot.get('snapshot_id'))
             write_name = False  # only write feature names once
         except Exception as e:
             log.error(f"Error converting snapshot to PyG data: {e}")
     return dataset
 
+def _het_snapshots_to_dataset(snapshots):
+    dataset = []
+    write_name = True
+    for snapshot in snapshots:
+        try:
+            pyg_data = to_pyg_hetero_data(snapshot, write_name=write_name)
+            dataset.append(pyg_data)
+            write_name = False  # only write feature names once
+        except Exception as e:
+            log.error(f"Error converting snapshot to PyG hetero data: {e}")
+    return dataset
+
+def get_mapped_anomaly_labels(labels,is_binary: bool):
+    """Map string labels to indices based on y_labels"""
+    if is_binary:
+            is_normal = all(label.lower() == 'normal' for label in labels)
+            return [ylabel_to_index('normal') if is_normal else ylabel_to_index('anomaly')]
+    else:
+        mapped = []
+        for label in labels:
+            if label.lower() in y_labels:
+                mapped.append(ylabel_to_index(label.lower()))
+            else:
+                mapped.append(ylabel_to_index('anomaly'))  # default to anomaly if unknown
+        return mapped
+
 async def handle_message(request):
     async with SEM:
-        await _process_request(request)
+        await _process_request_gnn_het(request)
 
-async def _process_request(request: DetectAnomalyRequest):
+async def _process_request_gnn_het(request: DetectAnomalyRequest):
+    """Train model based on src/models/gnn_het.py GNNHeteroAnomalyDetector class which uses GNNHeteroModel"""
+    
+    # get all snapshots
+    snapshots = await SnapshotRepository.get_all_snapshots(request.duration, request.system_id)
+
+    # Convert each snapshot to PyG data
+    temp_data = _het_snapshots_to_dataset(snapshots)
+    dataset = []
+    y_counts = np.zeros(len(y_labels), dtype=int)
+    _write_name = True
+    for data in temp_data:
+        
+        write_hetero_feature_mappings(data, data.snapshot_id, write_name=_write_name)
+        _write_name = False
+        # get y Labels from AggregateRepository
+        log.info(f"Getting labels for snapshot ID: {data.snapshot_id}")
+        labels = await AggregateRepository.get_labels_for_snapshot(data.snapshot_id, request.system_id, request.duration)
+        log.info(f"Snapshot ID: {data.snapshot_id} has labels: {labels}")
+        mapped_labels = get_mapped_anomaly_labels(labels, is_binary=False)
+        need_copy = False
+        for label in mapped_labels:
+            if need_copy:
+                newdata = data.clone()
+            else:
+                newdata = data
+            newdata.y = torch.tensor([label], dtype=torch.float32)
+            y_counts[label] += 1
+            dataset.append(newdata)
+            need_copy = True
+    
+    log.info(f"Prepared dataset with {len(dataset)} graphs")
+    log.info(f"Label distribution: " + ", ".join([f"{index_to_ylabel(i)}: {count}" for i, count in enumerate(y_counts)]))
+    config = {
+        "hidden_dim": 64,
+        "dropout": 0.5,
+        "learning_rate": 0.005,
+        "weight_decay": 0.001,
+        "early_stopping_patience": 15,
+        "early_stopping_min_delta": 0.0001,
+        "max_epochs": 100,
+        "num_heads": 4
+    }
+
+    # create model object
+    #self, config: Dict[str, Any], in_channels: int=51, out_channels: int=6
+    model = gnn_het.GNNHeteroClassifierModel(config=config, metadata=dataset[0].metadata())
+    
+    # split dataset into train/val/test
+    train_loader, val_loader, test_loader = gnn_het.build_data_loaders(dataset)
+    
+
+    # train model
+    model, criterion, metrics = fit_model(model, train_loader, val_loader, config)
+
+    # validate model
+    val_metrics = evaluate_model(model, val_loader, criterion)
+    log.info(f"Validation Metrics: {val_metrics}")
+
+    # test model
+    test_metrics = test_model(model, test_loader, criterion, test_description="multiclass_GNNEtHeteroModel Test Set")
+    log.info(f"Test Metrics: {test_metrics}")
+    # persist results to export folder for analysis as csv file
+
+
+async def _process_request_gnn_homogenous(request: DetectAnomalyRequest):
     """Train model based on src/models/gnn.py GNNAnomalyDetector class which uses GNNModel"""
     # get all snapshots
     snapshots = await SnapshotRepository.get_all_snapshots(request.duration, request.system_id)
@@ -102,7 +197,7 @@ async def _process_request(request: DetectAnomalyRequest):
     # persist results to export folder for analysis as csv file
 
 
-async def _process_request_OLD(request: DetectAnomalyRequest):
+async def _process_request_gnn_ae(request: DetectAnomalyRequest):
     # run in a new thread to avoid blocking        
     snapshots = []
     if request.snapshot_id and request.snapshot_id.strip() != "":

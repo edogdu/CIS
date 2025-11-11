@@ -87,12 +87,32 @@ class GNNClassifierModel(nn.Module):
         return x
 
 # Data splitting and sampling
-def build_data_loaders(dataset: torch.utils.data.Dataset):
+def build_data_loaders(dataset):
     """Stratified split of dataset into train and test sets based on graph labels."""
     logging.info("Building data loaders with stratified split for dataset with %d samples...", len(dataset))
     
     # Get labels for stratification
     labels = [data.y.item() for data in dataset]
+    class_counts = np.bincount(labels, minlength=len(y_labels))
+    logging.info("Overall class distribution in dataset: " + ", ".join([f"{y_labels[i]}: {count}" for i, count in enumerate(class_counts)]))
+
+    # Ensure each class has at least 15 samples for stratified splitting
+    need_oversampling = False
+    for i, count in enumerate(class_counts):
+        if count < 15:
+            need_oversampling = True
+            logging.warning("Class '%s' has only %d samples. Stratified splitting may not be reliable.", y_labels[i], count)
+            # manually oversample this class in the dataset
+            samples_to_add = 15 - count
+            class_samples = [data for data in dataset if data.y.item() == i]
+            for _ in range(samples_to_add):
+                dataset.append(class_samples[np.random.randint(0, len(class_samples))])
+            logging.info("After oversampling, dataset size is %d samples.", len(dataset))
+    if need_oversampling:
+        # Recompute labels after oversampling
+        labels = [data.y.item() for data in dataset]
+        class_counts = np.bincount(labels, minlength=len(y_labels))
+        logging.info("New Overall class distribution in dataset: " + ", ".join([f"{y_labels[i]}: {count}" for i, count in enumerate(class_counts)]))
 
     # split dataset for 60% train, 40% validation/final test
     splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.4, random_state=seed)
@@ -164,20 +184,29 @@ def build_data_loaders(dataset: torch.utils.data.Dataset):
 
 def get_criterion(data_loader: DataLoader) -> nn.Module:
     """Get loss function with class weights to handle class imbalance."""
-    # class_weights = get_weights([data.y.item() for data in data_loader.dataset], min_num_classes=len(y_labels))
-    # crit_weights = torch.tensor(class_weights, dtype=torch.float).to(DEVICE)
-    # logging.info("Criterion class weights: %s", class_weights.tolist())
-    # criterion = nn.CrossEntropyLoss(weight=crit_weights)
-    # criterion.to(DEVICE)
+    num_classes = data_loader.dataset[0].y.max().item() + 1
+    logging.info("Setting up criterion for %d classes.", num_classes)
 
-    labels = [data.y.item() for data in data_loader.dataset]
-    pos_weight = torch.tensor([(len(labels) - sum(labels)) / (sum(labels) + 1e-6)], dtype=torch.float)    
-    #pos_weight = pos_weight * 0.9 # scale down to avoid too high weight
+    if num_classes > 2:
+        # multi-class classification
+        class_weights = get_weights([data.y.item() for data in data_loader.dataset], min_num_classes=len(y_labels))
+        crit_weights = torch.tensor(class_weights, dtype=torch.float).to(DEVICE)
+        logging.info("Criterion class weights: %s", class_weights.tolist())
+        criterion = nn.CrossEntropyLoss(weight=crit_weights)
+        criterion.to(DEVICE)
+        return criterion
+    else:
+        # binary classification
+        labels = [data.y.item() for data in data_loader.dataset]
+        pos_weight = torch.tensor([(len(labels) - sum(labels)) / (sum(labels) + 1e-6)], dtype=torch.float)    
+        #pos_weight = pos_weight * 0.9 # scale down to avoid too high weight
 
-    logging.info("Criterion positive class weight: %.4f", pos_weight.item())
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    criterion.to(DEVICE)
-    return criterion
+        logging.info("Criterion positive class weight: %.4f", pos_weight.item())
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        criterion.to(DEVICE)
+        return criterion
+
+    
 
 # Training and evaluation functions
 
@@ -185,6 +214,7 @@ def train_epoch(model: nn.Module, loader: DataLoader, criterion: nn.Module, opti
     model.train()
     total_loss = 0
     metrics_hist = []
+    num_classes = loader.dataset[0].y.max().item() + 1
     #logging.info("Training on %d batches...", len(loader))
     try:
         epoch_y_true = []
@@ -199,7 +229,10 @@ def train_epoch(model: nn.Module, loader: DataLoader, criterion: nn.Module, opti
             #logging.info("Model forward pass completed.")
             #logging.info("criterion being used: %s", str(criterion))
             #logging.info("y type: %s, y shape: %s", str(batch.y.dtype), str(batch.y.shape))
-            loss = criterion(logits.squeeze(1), batch.y) 
+            if num_classes > 2:
+                loss = criterion(logits, batch.y.long())
+            else:
+                loss = criterion(logits.squeeze(1), batch.y)
             #logging.info("Loss calculation completed.")
             loss.backward()            
             #logging.info("Loss backward pass completed.")
@@ -220,19 +253,7 @@ def train_epoch(model: nn.Module, loader: DataLoader, criterion: nn.Module, opti
 
         mean_loss = total_loss / len(loader.dataset)
         # Compute overall metrics for the epoch
-        f1 = f1_score(epoch_y_true, epoch_y_pred, average='binary', zero_division=0)
-        balanced_acc = balanced_accuracy_score(epoch_y_true, epoch_y_pred)
-        accuracy = accuracy_score(epoch_y_true, epoch_y_pred)
-        recall = recall_score(epoch_y_true, epoch_y_pred, average='binary', zero_division=0)
-        precision = precision_score(epoch_y_true, epoch_y_pred, average='binary', zero_division=0)  
-        return {
-            "loss": mean_loss,
-            "f1_score": f1,
-            "balanced_accuracy": balanced_acc,
-            "accuracy": accuracy,
-            "recall": recall,
-            "precision": precision
-        }
+        return get_label_metrics(epoch_y_true, epoch_y_pred, mean_loss)
 
     except Exception as e:
         logging.error("Error during training epoch: %s", str(e))
@@ -240,7 +261,33 @@ def train_epoch(model: nn.Module, loader: DataLoader, criterion: nn.Module, opti
     
     #logging.info("Epoch Train Loss: %.4f, Mean Anomaly Macro F1: %.4f, Mean Macro F1: %.4f, Mean Balanced Acc: %.4f",
     #             mean_loss, mean_anomaly_macro_f1, mean_macro_f1, mean_balanced_acc)
+def get_label_metrics(y_true, y_pred, mean_loss):
+    is_binary_classification = (y_true.max().item() + 1) == 2
+    average_type = 'binary' if is_binary_classification else 'macro'
+    precision_val = precision_score(y_true, y_pred, average=average_type, zero_division=0)
+    recall_val = recall_score(y_true, y_pred, average=average_type, zero_division=0)
+    f1_score_val = f1_score(y_true, y_pred, average=average_type, zero_division=0)
+    accuracy = accuracy_score(y_true, y_pred)
+    balanced_accuracy = balanced_accuracy_score(y_true, y_pred)
+
+    return {
+        "loss": mean_loss,
+        "precision": precision_val,
+        "recall": recall_val,
+        "f1_score": f1_score_val,
+        "accuracy": accuracy,
+        "balanced_accuracy": balanced_accuracy
+    } 
+
+def get_multiclass_label_metrics(y_true, y_pred):
+    # Overall F1 score for anomaly classes only (exclude normal class 0)
+    balanced_accuracy = balanced_accuracy_score(y_true, y_pred)
+    accuracy_score = accuracy_score(y_true, y_pred)
     
+    
+    return {        
+        "balanced_accuracy": balanced_accuracy
+    }  
 
 @torch.no_grad()
 def evaluate_model(model: nn.Module, loader: DataLoader, criterion: nn.Module):
@@ -263,20 +310,7 @@ def evaluate_model(model: nn.Module, loader: DataLoader, criterion: nn.Module):
         
     
     mean_loss = total_loss / total_num
-    precision_val = precision_score(y_all, y_pred_all, average='binary', zero_division=0)
-    recall_val = recall_score(y_all, y_pred_all, average='binary', zero_division=0)
-    f1_score_val = f1_score(y_all, y_pred_all, average='binary', zero_division=0)
-    accuracy = accuracy_score(y_all, y_pred_all)
-    balanced_accuracy = balanced_accuracy_score(y_all, y_pred_all)
-
-    return {
-        "loss": mean_loss,
-        "f1_score": f1_score_val,
-        "precision": precision_val,
-        "recall": recall_val,
-        "accuracy": accuracy,
-        "balanced_accuracy": balanced_accuracy
-    }
+    return get_label_metrics(y_all, y_pred_all, mean_loss)
 
 def fit_model(model: nn.Module, train_loader: DataLoader, val_loader: DataLoader, config: Dict[str, Any]):
     """Train the GNN model with early stopping based on validation anomaly macro F1 score."""
@@ -315,9 +349,8 @@ def fit_model(model: nn.Module, train_loader: DataLoader, val_loader: DataLoader
             logging.info("New best model found at epoch %d with F1 Score: %.4f", epoch, val_metrics["f1_score"])
 
         if early_stopper.step(val_metrics["f1_score"]):
-            logging.info("Early stopping triggered at epoch %d", epoch)
-            logging.info("Ignoring early stopping for debugging purposes.")
-            #break
+            logging.info("Early stopping triggered at epoch %d", epoch)            
+            break
 
     # Load best model state
     if best_model_state is not None:
@@ -346,7 +379,7 @@ def test_model(model: nn.Module, test_loader: DataLoader, criterion: nn.Module, 
     
 
     # export classification report to dataframe and save as csv
-    report_dict = classification_report(y_all, y_pred_all, output_dict=True, zero_division=0)
+    report_dict = classification_report(y_all, y_pred_all, labels=[0, 1, 2, 3, 4, 5], target_names=y_labels, output_dict=True, zero_division=0)
     report_df = pd.DataFrame(report_dict).transpose()
     
     report_df.to_csv(f"./exports/results/classification_report_{test_description}.csv")
@@ -354,14 +387,14 @@ def test_model(model: nn.Module, test_loader: DataLoader, criterion: nn.Module, 
     return test_metrics
 
 # Helper functions for training and evaluation
-# def get_weights(labels, min_num_classes, epsilon=1e-6):
-#     """Compute class weights to handle class imbalance."""
-#     counts = np.bincount(labels, minlength=min_num_classes).astype(np.float32)
-#     counts[counts == 0] = epsilon  # avoid division by zero
-#     weights = 1.0 / counts
-#     weights = weights / np.sum(weights) * len(counts)  # normalize
-#     weights[~np.isfinite(weights)] = epsilon  # handle any inf or nan
-#     return weights
+def get_weights(labels, min_num_classes, epsilon=1e-6):
+    """Compute class weights to handle class imbalance."""
+    counts = np.bincount(labels, minlength=min_num_classes).astype(np.float32)
+    counts[counts == 0] = epsilon  # avoid division by zero
+    weights = 1.0 / counts
+    weights = weights / np.sum(weights) * len(counts)  # normalize
+    weights[~np.isfinite(weights)] = epsilon  # handle any inf or nan
+    return weights
 
 class GNNEarlyStopping:
     """Early stopping utility to stop training when 
