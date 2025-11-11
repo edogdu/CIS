@@ -402,7 +402,34 @@ def init_db():
                                 LIMIT 1
                             ) AS dst ON TRUE;
                             """)
-
+                cur.execute("""
+                            CREATE TABLE IF NOT EXISTS anomaly_alerts (
+                            bucket TIMESTAMPTZ NOT NULL,
+                            duration INTEGER NOT NULL,
+                            system_id TEXT NOT NULL,
+                            snapshot_id TEXT NOT NULL,
+                            model_type TEXT NOT NULL,
+                            anomaly_score DOUBLE PRECISION NOT NULL,                            
+                            detection_ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+                            src_graph_id integer,
+                            dst_graph_id integer                        
+                            );  
+                        """)
+                cur.execute("""                             
+                            CREATE INDEX IF NOT EXISTS idx_anomaly_alerts_system_time ON anomaly_alerts (system_id, bucket);
+                        """)
+                cur.execute("""
+                            CREATE TABLE IF NOT EXISTS anomaly_detection_results (
+                            bucket TIMESTAMPTZ NOT NULL,
+                            duration INTEGER NOT NULL,
+                            system_id TEXT NOT NULL,
+                            model_type TEXT NOT NULL,
+                            expected_attack_type TEXT,
+                            predicted_is_attack BOOLEAN,
+                            predicted_attack_type TEXT,
+                            evaluation_ts TIMESTAMPTZ NOT NULL DEFAULT now()
+                            );                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     
+                        """)
 
                 print("Database tables and views initialized successfully.")
     finally:

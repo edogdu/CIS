@@ -130,7 +130,7 @@ def preprocess_phys_data(df):
                                                                         .otherwise(lit("unknown"))
                                                                        )
                                  ).withColumn("measure_value", col("measure_value").cast("double")
-                                 ).withColumn("attributes", create_map(lit("Label_n"), col("Label_n"), lit("Label"), col("Label"))
+                                 ).withColumn("attributes", create_map(lit("Label_n"), col("Label_n"), lit("Label"), when(col("Label") == "nomal", lit("normal")).otherwise(col("Label")))
                                  ).drop("Label_n").drop("Label").drop("Time")
 
 
@@ -179,7 +179,7 @@ def preprocess_network_data(df):
                              lit("flags"), col("flags"),
                              lit("modbus_response"), col("modbus_response"),
                              lit("label_n"), col("label_n"),
-                             lit("label"), col("label")
+                             lit("label"), when(col("label") == "nomal", lit("normal")).otherwise(col("label"))
                          ))
 
 def send_to_kafka(df, topic):
@@ -214,6 +214,13 @@ def send_to_kafka(df, topic):
 if __name__ == "__main__":
     spark = SparkSession.builder.appName("CISBulkDataLoader").getOrCreate()
     try:
+        #physical       
+        phys_df_utf8 = spark.read.options(delimiter="\t", header=True, schema=phys_data_schema, nullValue="NaN", encoding="UTF-8").csv(f"{phys_data_path}/phy_*.csv")
+        final_utf8phys_df = preprocess_phys_data(phys_df_utf8)
+        #print(f"final_utf8phys_df: {final_utf8phys_df.take(100)}")
+        send_to_kafka(final_utf8phys_df, phys_topic)
+        print("Physical data load complete.")
+
         #network
         network_df = spark.read.csv(f"{network_data_path}/*.csv"
                                    ,header=True
@@ -222,13 +229,6 @@ if __name__ == "__main__":
         final_network_df = preprocess_network_data(network_df)
         send_to_kafka(final_network_df, network_topic)
         print("Network data load complete.")
-
-        #physical       
-        phys_df_utf8 = spark.read.options(delimiter="\t", header=True, schema=phys_data_schema, nullValue="NaN", encoding="UTF-8").csv(f"{phys_data_path}/phy_*.csv")
-        final_utf8phys_df = preprocess_phys_data(phys_df_utf8)
-        #print(f"final_utf8phys_df: {final_utf8phys_df.take(100)}")
-        send_to_kafka(final_utf8phys_df, phys_topic)
-        print("Physical data load complete.")
     finally:
         spark.stop()
         print("Spark session stopped.")

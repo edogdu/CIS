@@ -9,7 +9,7 @@ logging.basicConfig(level=logging.INFO
                     , filemode='a')
 log = logging.getLogger("Data.Error")
 
-kafka_bootstrap_servers = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092')
+kafka_bootstrap_servers = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'cis-kafka:9092')
 kafka_data_errors_topic = os.getenv('KAFKA_DATA_ERROR_TOPIC', 'Data.Error')
 
 async def consume_data_errors():
