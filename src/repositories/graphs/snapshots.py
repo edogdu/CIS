@@ -86,7 +86,13 @@ class SnapshotRepository:
                         num_connections: $num_connections,
                         source: $source_key,
                         destination: $destination_key,
-                        snapshot_id: $snapshot_id
+                        snapshot_id: $snapshot_id,
+                        source_ip: $source_ip,
+                        source_mac: $source_mac,
+                        destination_ip: $destination_ip,
+                        destination_mac: $destination_mac,
+                        source_port: $source_port,
+                        destination_port: $destination_port                        
                     })
                     ON CREATE SET conn.source_port = $source_port,
                         conn.destination_port = $destination_port,
@@ -96,10 +102,10 @@ class SnapshotRepository:
                     MERGE (s)-[:CONTAINS]->(conn)
                     """,
                     snapshot_id=snapshot_id,
-                    source_ip=(record.source_ip or None),
-                    source_mac=(record.source_mac or None),
-                    destination_ip=(record.destination_ip or None),
-                    destination_mac=(record.destination_mac or None),
+                    source_ip=record.source_ip if record.source_ip != None else 0,
+                    source_mac=record.source_mac if record.source_mac != None else 0,
+                    destination_ip=record.destination_ip if record.destination_ip != None else 0,
+                    destination_mac=record.destination_mac if record.destination_mac != None else 0,
                     bucket=record.bucket,
                     duration=record.duration,
                     protocol=record.protocol,
@@ -109,10 +115,11 @@ class SnapshotRepository:
                     min_size=record.min_size,
                     max_size=record.max_size,
                     num_connections=record.num_connections,
-                    source_port=record.source_port,
-                    destination_port=record.destination_port,
+                    source_port=record.source_port if record.source_port != None else 0,
+                    destination_port=record.destination_port if record.destination_port != None else 0,
                     source_key=record.source_key,
                     destination_key=record.destination_key
+                    
                 )
     async def get_snapshot(snapshot_id: str):
         neo4j = await DataFactory.get_neo4j_instance()
@@ -182,6 +189,68 @@ class SnapshotRepository:
                 return record["value"]
             else:
                 return None
+            
+    async def get_all_snapshots(duration:int, system_id: str):
+        neo4j = await DataFactory.get_neo4j_instance()
+        async with neo4j.session() as session:            
+            snapshots = []
+            results = await session.run(
+                """
+                // Fetch all snapshots for the given system_id and duration
+                MATCH (s:Snapshot {system_id: $system_id, duration: $duration})
+                
+                CALL{      
+                    // For each snapshot, find all contained Connections and Measurements
+                    WITH s
+                    MATCH (s)-[:CONTAINS]->(item)
+                    WHERE item:Connection OR item:Measurement
+
+                    // Find directly connected Endpoints and Assets
+                    OPTIONAL MATCH (item)-[r1]-(r1_node)
+                    WHERE r1_node:Endpoint OR r1_node:Asset
+
+                    // Find second-level connections to connect our graph more fully
+                    WITH s, item, r1, r1_node
+                    OPTIONAL MATCH (r1_node)-[r2]-(r2_node)
+                    WHERE r1_node:Asset AND (r2_node:Endpoint OR r2_node:Asset)
+
+                    // Collect all unique nodes and relationships
+                    WITH s,
+                    collect(DISTINCT item) + collect(DISTINCT r1_node) + collect(DISTINCT r2_node) as temp_all_nodes,
+                    collect(DISTINCT r1) + collect(DISTINCT r2) as temp_rels
+
+                    // Remove duplicates and NULLS
+                    WITH s,
+                    [n IN temp_all_nodes WHERE n IS NOT NULL] AS all_nodes,
+                    [r IN temp_rels WHERE r IS NOT NULL] AS rels
+
+                    RETURN {
+                        snapshot_id: s.snapshot_id,
+                        start_time: s.start_time,
+                        nodes: [node IN all_nodes | {
+                            id: id(node),
+                            labels: labels(node),
+                            properties: apoc.map.removeKeys(properties(node), ['snapshot_id', 'system_id'])
+                        }],
+                        relationships: [rel IN rels | {
+                            type: type(rel),
+                            source: id(startNode(rel)),
+                            target: id(endNode(rel)),
+                            properties: properties(rel)
+                        }]
+                    } AS snapshot
+                }
+                RETURN collect(snapshot) AS snapshots
+                """,
+                duration=duration,
+                system_id=system_id
+            )
+            record = await results.single()
+            if record:
+                snapshots = record["snapshots"]
+            logger.info(f"Fetched {len(snapshots)} snapshots.")
+            return snapshots
+        
     async def get_snapshots(start_time: str, end_time: str, duration:int, system_id: str):
         neo4j = await DataFactory.get_neo4j_instance()
         async with neo4j.session() as session:            

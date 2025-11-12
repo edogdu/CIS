@@ -12,6 +12,7 @@ from typing import List, Dict, Any, Tuple
 import os
 import pandas as pd        
 import datetime
+import numpy as np
 
 modelrunner_log = logging.getLogger("models_runner")
 
@@ -81,7 +82,7 @@ class GNNAEModelRunner(ModelRunner):
         self.optimizer = optim.Adam(self.model.parameters(), 
                                     lr=self.config["learning_rate"],
                                     weight_decay=self.config["weight_decay"])
-        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5, patience=10, min_lr=1e-5)
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-5)
         
         if hasattr(self.xai_runner, 'set_encoder'):
             self.xai_runner.set_encoder(self.model.encoder)
@@ -171,7 +172,7 @@ class GNNAEModelRunner(ModelRunner):
             edge_counts.append(probs.numel())
             logging.info(f"Processed training graph #{i} with {probs.numel()} edges for threshold determination.")
         all_probs_tensor = torch.cat(all_probs)
-        edge_threshold_value = torch.quantile(all_probs_tensor, edge_percentile)
+        edge_threshold_value = np.min(all_probs_tensor.cpu().detach().numpy())
         self.edge_threshold = edge_threshold_value.mean().item()
         modelrunner_log.info(f"Determined anomaly detection edge threshold at {edge_percentile}: {self.edge_threshold}")
 
@@ -289,14 +290,15 @@ class GNNAEModelRunner(ModelRunner):
     def detect_anomalies(self, data, threshold: float=0.65) -> List[Tuple[int, int]]:
         """Detect anomalies in the graph based on edge reconstruction scores."""
         scores = self.predict(data)
-        anomaly_indices = (scores < self.edge_threshold).nonzero(as_tuple=False).view(-1)
+        # get indices where scores are below threshold and sort by score
+        anomaly_indices = (scores < threshold).nonzero(as_tuple=False).view(-1)
         snapshot_anomaly_ratio = float(anomaly_indices.numel() / scores.numel())
         modelrunner_log.info(f"Snapshot anomaly ratio: {snapshot_anomaly_ratio}, Snapshot threshold: {self.snapshot_threshold}")
-        if snapshot_anomaly_ratio < self.snapshot_threshold:
-            return []
+        #if snapshot_anomaly_ratio < self.snapshot_threshold:
+        #    return []
         anomalies = []        
 
-        for idx in anomaly_indices.tolist():
+        for idx in range(scores.numel()):
             u = data.edge_index[0, idx].item()
             v = data.edge_index[1, idx].item()
             anomaly_score = scores[idx].item()
@@ -304,11 +306,12 @@ class GNNAEModelRunner(ModelRunner):
             anomalies.append({
                 'src_tensorid': u,
                 'dst_tensorid': v,
-                'anomaly_score': anomaly_score
+                'anomaly_score': anomaly_score,
+                'is_anomaly': idx in anomaly_indices
             })
         return anomalies
 
-    def save_anomalies_csv(self, system_id, model_name, anomalies: List[Tuple[int, int]], path: str):
+    def save_anomalies_csv(self, system_id, model_name, anomalies: List[Tuple[int, int]], path: str, include_xai: bool=True):
         """Save detected anomalies to a CSV file."""
         df = pd.DataFrame(anomalies)
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
