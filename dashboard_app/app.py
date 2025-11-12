@@ -1,5 +1,6 @@
-# app.py — Amiran Cyber Intelligence Dashboard (Wireframe + colored nodes + NVL optional)
+# app.py — Amiran Cyber Intelligence Dashboard (agraph pretty mode + NVL via CDN)
 import os
+import json
 import pandas as pd
 import streamlit as st
 import plotly.express as px
@@ -7,19 +8,7 @@ from psycopg.rows import dict_row
 import psycopg
 from neo4j import GraphDatabase
 from streamlit_agraph import agraph, Node, Edge, Config
-
-# ---- TRY NVL (optional) -----------------------------------------------------
-# If NVL (Neo4j Visualization Library for Python) is available, we'll use it.
-# If not, we silently fall back to streamlit-agraph.
-_HAS_NVL = False
-try:
-    # The package name may vary depending on the preview build.
-    # If your install uses a different import path, change it here.
-    # Example names people use in preview builds: `nvl`, `neo4j_nvl`, `nvl_python`
-    import nvl  # noqa: F401
-    _HAS_NVL = True
-except Exception:
-    _HAS_NVL = False
+from streamlit.components.v1 import html
 
 st.set_page_config(page_title="Amiran — Cyber Intelligence Dashboard", layout="wide")
 
@@ -44,7 +33,11 @@ def _pg_dsn():
 def _neo_conf():
     # 1) secrets.toml
     try:
-        return (st.secrets["neo4j"]["uri"], st.secrets["neo4j"]["user"], st.secrets["neo4j"]["password"])
+        return (
+            st.secrets["neo4j"]["uri"],
+            st.secrets["neo4j"]["user"],
+            st.secrets["neo4j"]["password"],
+        )
     except Exception:
         pass
     # 2) env or localhost
@@ -77,7 +70,8 @@ def get_neo():
 def list_systems():
     sql = "SELECT DISTINCT system_id FROM assets ORDER BY system_id;"
     conn = get_pg()
-    if not conn: return pd.DataFrame(columns=["system_id"])
+    if not conn:
+        return pd.DataFrame(columns=["system_id"])
     try:
         with conn.cursor() as cur:
             cur.execute(sql)
@@ -89,7 +83,8 @@ def list_systems():
 def kpis_overview():
     conn = get_pg()
     out = {"active_systems": 0, "systems_with_alerts": 0, "critical_alerts": 0}
-    if not conn: return out
+    if not conn:
+        return out
     try:
         with conn.cursor() as cur:
             try:
@@ -115,7 +110,8 @@ def kpis_overview():
 @st.cache_data(ttl=120, show_spinner=False)
 def alerts_timeline(days=7):
     conn = get_pg()
-    if not conn: return pd.DataFrame(columns=["ts", "cnt"])
+    if not conn:
+        return pd.DataFrame(columns=["ts", "cnt"])
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -135,7 +131,8 @@ def alerts_timeline(days=7):
 @st.cache_data(ttl=120, show_spinner=False)
 def list_alerts(system_id: str, limit: int = 400):
     conn = get_pg()
-    if not conn: return pd.DataFrame()
+    if not conn:
+        return pd.DataFrame()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -155,7 +152,8 @@ def list_alerts(system_id: str, limit: int = 400):
 @st.cache_data(ttl=300, show_spinner=False)
 def mitre_for_alert(alert_id: str):
     conn = get_pg()
-    if not conn: return pd.DataFrame(columns=["technique_id", "technique", "tactic"])
+    if not conn:
+        return pd.DataFrame(columns=["technique_id", "technique", "tactic"])
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -171,65 +169,109 @@ def mitre_for_alert(alert_id: str):
     except Exception:
         return pd.DataFrame(columns=["technique_id", "technique", "tactic"])
 
-# --- New: which assets are "problematic" (for coloring) ----------------------
+# --- Max severity per asset (for coloring) -----------------------------------
 @st.cache_data(ttl=60, show_spinner=False)
-def problem_assets(snapshot_id: str = "latest", min_severity=("HIGH", "CRITICAL")) -> set:
+def asset_top_severity() -> dict:
     """
-    Returns a set of asset IDs that currently have alerts with severity in min_severity.
-    Adjust to your schema as needed (e.g., join by snapshot_id if you store it).
+    Returns {asset_id: 'CRITICAL'|'HIGH'|'MEDIUM'|'LOW'} based on max severity.
     """
     conn = get_pg()
-    if not conn: return set()
+    if not conn:
+        return {}
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT DISTINCT asset_id
+            cur.execute("""
+                SELECT asset_id,
+                       CASE
+                         WHEN MAX(CASE WHEN severity='CRITICAL' THEN 1 ELSE 0 END)=1 THEN 'CRITICAL'
+                         WHEN MAX(CASE WHEN severity='HIGH' THEN 1 ELSE 0 END)=1 THEN 'HIGH'
+                         WHEN MAX(CASE WHEN severity='MEDIUM' THEN 1 ELSE 0 END)=1 THEN 'MEDIUM'
+                         WHEN MAX(CASE WHEN severity='LOW' THEN 1 ELSE 0 END)=1 THEN 'LOW'
+                         ELSE NULL
+                       END AS top_sev
                 FROM alerts
-                WHERE severity = ANY(%s)
-                """,
-                (list(min_severity),),
-            )
+                GROUP BY asset_id
+            """)
             rows = cur.fetchall()
-            return {r["asset_id"] for r in rows if r.get("asset_id")}
+            return {r["asset_id"]: r["top_sev"] for r in rows if r.get("asset_id")}
     except Exception:
-        return set()
+        return {}
 
-# --- Graph retrieval from Neo4j ---------------------------------------------
+# ------------------------ Neo4j Helpers ------------------------
+def _nid(n):
+    # neo4j driver v4/v5 compatibility for node/relationship element id
+    return getattr(n, "element_id", None) or getattr(n, "id", None)
+
+def _prop(n, key):
+    # Safely fetch node property from Neo4j Node
+    try:
+        return n.get(key)
+    except Exception:
+        try:
+            return n[key]
+        except Exception:
+            try:
+                return dict(n).get(key)
+            except Exception:
+                return None
+
+# --- Graph retrieval from Neo4j (real edges; ID = asset_id when present) -----
 @st.cache_data(ttl=60, show_spinner=False)
-def neo4j_graph_for_snapshot(snapshot_id: str):
+def neo4j_graph_for_snapshot(snapshot_id: str, rel_types: list[str]):
     """
-    Returns node/edge lists from Neo4j.
-    Nodes include `id`, `label`, optional `color` (we add after this call).
+    Returns (nodes, edges) from Neo4j for given snapshot and relationship types.
+    nodes: {'id': <asset_id|name|element_id>, 'label': <string>, 'asset_id': <str|None>, 'labels':[...]}
+    edges: {'source': <node_id>, 'target': <node_id>, 'type': <rel_type>}
     """
     drv = get_neo()
-    if not drv: return [], []
+    if not drv:
+        return [], []
+
     q = """
     MATCH (s:System {snapshot_id: $snap})-[:CONTAINS]->(a:Asset)
-    OPTIONAL MATCH (a)-[r:CONNECTED_TO]->(b:Asset)
-    RETURN collect(DISTINCT a) AS assets, collect(DISTINCT r) AS rels, collect(DISTINCT b) AS others
-    LIMIT 2000
+    OPTIONAL MATCH (a)-[r]->(b:Asset)
+    WHERE type(r) IN $rels AND (s)-[:CONTAINS]->(b)
+    RETURN collect(DISTINCT a) AS assets,
+           collect(DISTINCT r) AS rels,
+           collect(DISTINCT b) AS others
+    LIMIT 5000
     """
     try:
         with drv.session() as ssn:
-            rec = ssn.run(q, snap=snapshot_id).single()
-        if not rec: return [], []
-        assets = rec["assets"] or []; others = rec["others"] or []; rels = rec["rels"] or []
-        def _nid(n):
-            # neo4j driver v4/v5 compatibility
-            return getattr(n, "element_id", None) or getattr(n, "id", None)
+            rec = ssn.run(q, snap=snapshot_id, rels=rel_types).single()
+        if not rec:
+            return [], []
+
+        assets = rec["assets"] or []
+        others = rec["others"] or []
+        rels   = rec["rels"]   or []
+
+        def node_key(n):
+            # Prefer asset_id → name → element id (string)
+            return str(_prop(n, "asset_id") or _prop(n, "name") or _nid(n))
+
+        def node_label(n):
+            return str(_prop(n, "name") or _prop(n, "asset_id") or node_key(n))
 
         node_map = {}
         for n in assets + others:
-            nid = _nid(n)
-            label = n.get("name") or n.get("id") or str(nid)
-            # Keep raw node with basic fields; color will be applied later
-            node_map[nid] = {"id": str(nid), "label": str(label)}
+            kid = node_key(n)
+            node_map[kid] = {
+                "id": kid,
+                "label": node_label(n),
+                "asset_id": _prop(n, "asset_id"),
+                "labels": _prop(n, "labels") or [],
+            }
 
         edges = []
         for r in rels:
-            sid = _nid(r.start_node); tid = _nid(r.end_node)
-            edges.append({"source": str(sid), "target": str(tid)})
+            try:
+                s_id = node_key(r.start_node)
+                t_id = node_key(r.end_node)
+                edges.append({"source": s_id, "target": t_id, "type": r.type})
+            except Exception:
+                continue
+
         return list(node_map.values()), edges
     except Exception:
         return [], []
@@ -315,14 +357,21 @@ with tabs[1]:
 
                 if "alert_id" in alerts and not alerts.empty:
                     st.markdown("##### Explainability (Top Features)")
-                    sel_alert = st.selectbox("Alert", alerts["alert_id"], key="sel_alert_xai")
-                    # NOTE: Hook your XAI table here when ready
+                    _ = st.selectbox("Alert", alerts["alert_id"], key="sel_alert_xai")
                     st.caption("XAI hookup placeholder — add your `xai_top_features()` call when table is populated.")
 
 # ------------------------ 🧩 Knowledge Graph ------------------------
 with tabs[2]:
     st.subheader("Knowledge Graph (Neo4j)")
     snapshot_id = st.text_input("Snapshot ID", value="latest", help="Enter a snapshot id stored in Neo4j")
+
+    # Relationship types control
+    rel_opts = st.multiselect(
+        "Relationship types",
+        ["FEEDS_TO", "FEEDS_THROUGH"],
+        default=["FEEDS_TO", "FEEDS_THROUGH"],
+        help="Select which edge types to include."
+    )
 
     # Color palette options
     st.markdown("**Node coloring**")
@@ -332,8 +381,6 @@ with tabs[2]:
         index=0,
         help="Pick a color set for problem vs normal nodes."
     )
-
-    # Define colors (easily adjustable)
     if palette == "Protanopia-friendly":
         COLOR_CRIT = "#6e016b"   # purple-ish
         COLOR_HIGH = "#88419d"   # lighter purple
@@ -352,83 +399,161 @@ with tabs[2]:
     with lc3: st.markdown(f"<div style='height:12px;width:12px;background:{COLOR_NORM};display:inline-block;border-radius:3px'></div> **Normal**", unsafe_allow_html=True)
     with lc4: st.markdown(f"<div style='height:12px;width:12px;background:{COLOR_OTHER};display:inline-block;border-radius:3px'></div> **Other**", unsafe_allow_html=True)
 
-    use_nvl = st.checkbox("Use NVL (if installed)", value=True,
-                          help="Try Neo4j Visualization Library; fallback to agraph if unavailable.")
+    # View mode: Graph vs Table and renderer choice
+    col_mode, col_renderer = st.columns([1,1])
+    with col_mode:
+        show_table = st.checkbox("Show as table (instead of graph)", value=False)
+    with col_renderer:
+        use_nvl = st.checkbox(
+            "Use NVL renderer (via CDN)",
+            value=True,
+            help="If on, renders with @neo4j-nvl/base from a CDN. Else uses agraph pretty mode."
+        )
 
-    if st.button("Load Graph", type="primary"):
-        nodes_raw, edges_raw = neo4j_graph_for_snapshot(snapshot_id)
-        if not nodes_raw and not edges_raw:
-            st.info("No graph data for this snapshot (or Neo4j not connected).")
+    # Load action
+    if st.button("Load", type="primary"):
+        if not rel_opts:
+            st.warning("Pick at least one relationship type.")
         else:
-            # Determine problem nodes from alerts table
-            problem = problem_assets(snapshot_id, min_severity=("HIGH", "CRITICAL"))
-            # Assign colors
-            # We don't know per-asset severity here; we'll mark CRITICAL if it has any CRITICAL alert,
-            # otherwise HIGH if it has any HIGH alert. If you store per-asset-most-recent severity,
-            # swap this with a query that returns exact severity per asset.
-            # For now, treat every "problem" asset as HIGH; you can refine by joining severity later.
-            problem_set = set(problem)
-
-            # Build agraph nodes/edges with colors
-            a_nodes = []
-            id_to_color = {}
-            for n in nodes_raw:
-                nid = n["id"]
-                label = n["label"]
-                if nid in problem_set:
-                    # Use HIGH color currently; you can split CRITICAL/HIGH with a more specific query
-                    color = COLOR_HIGH
-                else:
-                    color = COLOR_NORM
-                id_to_color[nid] = color
-                a_nodes.append(Node(id=nid, label=label, size=18, color=color))
-
-            a_edges = [Edge(source=e["source"], target=e["target"]) for e in edges_raw]
-
-            # Try NVL if selected & available
-            if use_nvl and _HAS_NVL:
-                try:
-                    # Minimal example: build an NVL graph and style nodes by our mapping.
-                    # Adjust this block to match the exact NVL Python API you install (preview builds can differ).
-                    import json
-                    from streamlit.components.v1 import html
-
-                    nvl_nodes = []
-                    for n in nodes_raw:
-                        nvl_nodes.append({
-                            "id": n["id"],
-                            "label": n["label"],
-                            "style": {"color": id_to_color.get(n["id"], COLOR_OTHER)}
-                        })
-                    nvl_edges = [{"source": e["source"], "target": e["target"]} for e in edges_raw]
-
-                    # Simple HTML emulation wrapper until NVL exposes a direct streamlit helper:
-                    payload = {"nodes": nvl_nodes, "edges": nvl_edges}
-                    html(f"""
-                        <div id="nvl" style="height:650px;border:1px solid #e5e7eb;border-radius:8px"></div>
-                        <script>
-                          const payload = {json.dumps(payload)};
-                          // If your NVL build exposes a global renderer, call it here.
-                          // For preview builds you might do something like:
-                          // NVL.render("#nvl", payload.nodes, payload.edges, {{ physics: true }});
-                          // Fallback message:
-                          document.getElementById('nvl').innerHTML =
-                            '<div style="padding:12px;font-family:system-ui">NVL is installed, but the preview API wrapper is not configured. Using fallback agraph below.</div>';
-                        </script>
-                    """, height=680)
-
-                    # Show agraph as a reliable fallback for now
-                    st.caption("NVL preview shown above (if configured). Fallback interactive graph below:")
-                    config = Config(height=620, width=1200, directed=True, physics=True, hierarchical=False)
-                    agraph(nodes=a_nodes, edges=a_edges, config=config)
-                except Exception as e:
-                    st.warning(f"NVL rendering had an issue: {e}. Falling back to agraph.")
-                    config = Config(height=620, width=1200, directed=True, physics=True, hierarchical=False)
-                    agraph(nodes=a_nodes, edges=a_edges, config=config)
+            nodes_raw, edges_raw = neo4j_graph_for_snapshot(snapshot_id, rel_opts)
+            if not nodes_raw and not edges_raw:
+                st.info("No graph data for this snapshot (or Neo4j not connected).")
             else:
-                # Pure agraph path
-                config = Config(height=620, width=1200, directed=True, physics=True, hierarchical=False)
-                agraph(nodes=a_nodes, edges=a_edges, config=config)
+                # Severity map & color function (used by both renderers)
+                sev_map = asset_top_severity()
+
+                def color_for(sev: str | None):
+                    if sev == "CRITICAL": return COLOR_CRIT
+                    if sev == "HIGH":      return COLOR_HIGH
+                    return COLOR_NORM
+
+                # Build dataframes for convenience
+                nodes_df = pd.DataFrame([{
+                    "id":       n["id"],
+                    "label":    n["label"],
+                    "asset_id": n.get("asset_id"),
+                } for n in nodes_raw])
+
+                if not nodes_df.empty:
+                    nodes_df["sev_key"]  = nodes_df["asset_id"].fillna(nodes_df["id"])
+                    nodes_df["severity"] = nodes_df["sev_key"].map(sev_map).fillna("normal")
+                    nodes_df["color"]    = nodes_df["severity"].map(color_for)
+
+                    # ✅ Force guaranteed label visibility (never blank)
+                    nodes_df["display"] = (
+                        nodes_df["label"].astype(str).str.strip()
+                        .where(nodes_df["label"].astype(str).str.strip().ne(""), None)
+                    )
+                    nodes_df["display"] = nodes_df["display"].fillna(
+                        nodes_df["asset_id"].astype(str).str.strip()
+                        .where(nodes_df["asset_id"].astype(str).str.strip().ne(""), None)
+                    )
+                    nodes_df["display"] = nodes_df["display"].fillna(nodes_df["id"].astype(str))
+
+                if not nodes_df.empty:
+                    nodes_df["sev_key"]  = nodes_df["asset_id"].fillna(nodes_df["id"])
+                    nodes_df["severity"] = nodes_df["sev_key"].map(sev_map).fillna("normal")
+                    nodes_df["color"]    = nodes_df["severity"].map(color_for)
+
+                edges_df = pd.DataFrame(
+                    [{"source": e["source"], "target": e["target"], "type": e.get("type", "")} for e in edges_raw]
+                )
+
+                if show_table:
+                    st.markdown("#### Nodes")
+                    st.dataframe(nodes_df, use_container_width=True, height=360)
+                    st.markdown("#### Edges")
+                    st.dataframe(edges_df, use_container_width=True, height=360)
+                else:
+                    if use_nvl:
+                        # ---------- NVL via CDN (labels + severity on node) ----------
+                        nvl_nodes = [
+                            {
+                                "id":    str(r["id"]),
+                                "label": f"{r['label']}\\n({str(r['severity']).upper()})",
+                                "color": r["color"],
+                            }
+                            for _, r in nodes_df.iterrows()
+                        ]
+                        nvl_rels = [
+                            {
+                                "id":   f"{row.get('type','EDGE')}-{i}",
+                                "from": str(row["source"]),
+                                "to":   str(row["target"]),
+                                "type": row.get("type", ""),
+                            }
+                            for i, row in edges_df.iterrows()
+                        ]
+
+                        html(f"""
+                          <div id="nvl-container" style="height:650px;border:1px solid #e5e7eb;border-radius:8px"></div>
+                          <script type="module">
+                            import {{ NVL }} from 'https://esm.sh/@neo4j-nvl/base';
+                            const nodes = {json.dumps(nvl_nodes)};
+                            const relationships = {json.dumps(nvl_rels)};
+                            const el = document.getElementById('nvl-container');
+                            const nvl = new NVL(el, nodes, relationships, {{
+                              physics: true,
+                              showLabels: true
+                            }});
+                            setTimeout(() => {{
+                              if (nvl && typeof nvl.zoomToFit === 'function') nvl.zoomToFit();
+                            }}, 200);
+                          </script>
+                        """, height=680)
+                        st.caption("Rendered with NVL (CDN).")
+                    else:
+                        # ---------- agraph Pretty Mode ----------
+                        st.markdown("**Display options**")
+                        colA, colB, colC = st.columns([1,1,1])
+                        with colA: show_edge_labels = st.checkbox("Show edge labels", value=True)
+                        with colB: physics_on      = st.checkbox("Physics layout", value=True)
+                        with colC: scale_by_degree = st.checkbox("Scale nodes by degree", value=True)
+
+                        # Degree map
+                        deg = {nid: 0 for nid in nodes_df["id"]}
+                        for _, e in edges_df.iterrows():
+                            deg[e["source"]] = deg.get(e["source"], 0) + 1
+                            deg[e["target"]] = deg.get(e["target"], 0) + 1
+
+                        def size_for(nid):
+                            if not scale_by_degree: return 18
+                            d = deg.get(nid, 0)
+                            return max(16, min(40, 14 + 3*d))
+
+                        a_nodes = [
+                            Node(
+                                id=row["id"],
+                                label=row["label"],
+                                size=size_for(row["id"]),
+                                color=row["color"],
+                                title=f"{row['label']}\nSeverity: {row['severity']}\nDegree: {deg.get(row['id'],0)}",
+                                shape="dot",
+                                font={"size": 14, "multi": "html"},
+                                borderWidth=1
+                            )
+                            for _, row in nodes_df.iterrows()
+                        ]
+                        a_edges = [
+                            Edge(
+                                source=e["source"], target=e["target"],
+                                label=(e["type"] if show_edge_labels else ""),
+                                title=e["type"], arrows="to", smooth=True, font={"size": 10}
+                            )
+                            for _, e in edges_df.iterrows()
+                        ]
+                        config = Config(
+                            height=650, width=1200, directed=True, physics=physics_on, hierarchical=False,
+                            options={
+                                "interaction": {"hover": True, "navigationButtons": True, "keyboard": True, "multiselect": True, "tooltipDelay": 120},
+                                "nodes": {"shadow": True, "font": {"size": 14}},
+                                "edges": {"arrows": {"to": {"enabled": True}}, "smooth": {"enabled": True, "type": "dynamic"}, "color": {"opacity": 0.7}, "width": 1.2},
+                                "physics": {"enabled": physics_on, "stabilization": {"enabled": True, "iterations": 250}, "solver": "forceAtlas2Based",
+                                            "forceAtlas2Based": {"gravitationalConstant": -45, "springLength": 90, "springConstant": 0.08}}
+                            }
+                        )
+                        agraph(nodes=a_nodes, edges=a_edges, config=config)
+                        st.caption("Rendered with agraph (pretty mode).")
 
 # ------------------------ 💽 System Health ------------------------
 with tabs[3]:
