@@ -39,7 +39,7 @@ global_schema = {
 }
 
 y_labels = ['normal', 'mitm', 'dos', 'scan', 'physical fault', 'anomaly']
-#y_labels = ['normal', 'anomaly']
+y_bin_labels = ['normal', 'anomaly']
 
 
 
@@ -106,18 +106,20 @@ class FeatureLayout:
 
 
 
-def ylabel_to_index(label: str) -> Optional[int]:
+def ylabel_to_index(label: str, binary: bool = False) -> Optional[int]:
     """Convert a label string to its index in the label space."""
-    if label is None or label.lower() not in y_labels:
+    if label is None or label.lower() not in (y_bin_labels if binary else y_labels):
         raise ValueError("Label cannot be None or unknown")
-    i = y_labels.index(label.lower())
+    i = (y_bin_labels if binary else y_labels).index(label.lower())
     return i
 
-def index_to_ylabel(i) -> str:
+def index_to_ylabel(i, binary: bool = False) -> str:
     """Convert an index to its corresponding label string."""
     idx = int(i)
-    if 0 <= idx < len(y_labels):
+    if not binary and 0 <= idx < len(y_labels):
         return y_labels[int(idx)]
+    elif binary and 0 <= idx < len(y_bin_labels):
+        return y_bin_labels[int(idx)]
     else:
         raise ValueError("Index out of range for y_labels")
 
@@ -512,13 +514,12 @@ def to_pyg_hetero_data(snapshot: dict, write_name: bool = False) -> Data:
 
     logging.info("Node feature tensors created.")
     #populate node features for each type and build ID mappings
-    for node_type, id_list in node_ids.items():
-        if id_list:
-            data[node_type].x = node_feature_tensors[node_type]
-            data[node_type].num_nodes = len(id_list)
+    for node_type, id_list in node_ids.items():        
+        data[node_type].x = node_feature_tensors[node_type]
+        data[node_type].num_nodes = len(id_list)
 
-            for i, node_id in enumerate(id_list):
-                node_id_to_index_map[node_id] = (node_type, i)
+        for i, node_id in enumerate(id_list):
+            node_id_to_index_map[node_id] = (node_type, i)
 
     # build edge indices for each node type
     edge_indices = {}
