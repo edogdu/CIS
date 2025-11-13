@@ -1,0 +1,6 @@
+measurement_type_state
+measurement_type_pressure
+measurement_type_val
+avg_value_state
+avg_value_pressure
+avg_value_val

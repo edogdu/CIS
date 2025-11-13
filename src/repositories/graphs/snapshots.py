@@ -249,6 +249,9 @@ class SnapshotRepository:
             if record:
                 snapshots = record["snapshots"]
             logger.info(f"Fetched {len(snapshots)} snapshots.")
+            with open(f"./exports/data/Graphs/all_snapshots_{duration}s.json", "w") as f:
+                import json
+                json.dump(snapshots, f, default=str, indent=4)
             return snapshots
         
     async def get_snapshots(start_time: str, end_time: str, duration:int, system_id: str):
