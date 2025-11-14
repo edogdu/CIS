@@ -3,7 +3,7 @@ __pycache__/
 *.pyc
 
 # Ignore downloaded files
-*.json
+#*.json
 *.xml
 
 # Ignore VSCode folders

@@ -253,6 +253,7 @@ services:
       environment:
         NEO4J_AUTH: "neo4j/changeme" # Default password if not set in env
         NEO4J_apoc_trigger_enabled: "true"
+        NEO4J_apoc_export_file_enabled: "true"
         NEO4JLABS_PLUGINS: '["apoc", "n10s"]' # Include n10s (Neosemantics) plugin
         NEO4J_ACCEPT_LICENSE_AGREEMENT: 'yes' # Required if using Enterprise version
         NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
@@ -272,7 +273,8 @@ services:
         NEO4J_apoc_jdbc_postgres_url: >
           jdbc:postgresql://timescaledb:5432/?user=&password=password&sslmode=disable
       volumes:
-        - neo4j-data:/data        
+        - neo4j-data:/data   
+        - ./services/neo4j/plugins:/var/lib/neo4j/plugins # Mount the plugins directory     
         - ./services/neo4j/import:/var/lib/neo4j/import # Mount the import directory for initial cypher scripts        
       networks:
         - crit_infra_net
@@ -497,13 +499,15 @@ services:
       container_name: cis-anomaly-detector-consumer
       profiles: [machine_learning]
       restart: unless-stopped
-      command: python anomaly_consumer.py
+      command: python3 anomaly_consumer.py
       depends_on:
         cis-kafka:
           condition: service_healthy          
         cis-timescaledb:
           condition: service_healthy
+      gpus: all
       environment:
+        NVIDIA_VISIBLE_DEVICES: "all"
         KAFKA_BOOTSTRAP_SERVERS: "cis-kafka:9092"
         KAFKA_TOPIC: "Anomaly.Predict"
         PG_DSN: "postgresql://postgres:password@timescaledb:5432/anomalydetection?sslmode=disable"

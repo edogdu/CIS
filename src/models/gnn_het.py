@@ -1,186 +1,240 @@
-from typing import Any, Dict, Tuple
+# Standard library imports
+import logging
+import os
+from typing import Any, Dict, List, Tuple
+
+# Third-party imports
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.data import Data
-#from torch_geometric.nn import GCNConv, global_mean_pool
+from sklearn.metrics import (
+    accuracy_score,
+    balanced_accuracy_score,
+    classification_report,
+    f1_score,
+    precision_score,
+    recall_score,
+)
 from sklearn.model_selection import StratifiedShuffleSplit
 from torch.utils.data import Subset, WeightedRandomSampler
+from torch_geometric.data import Batch, Data, HeteroData
 from torch_geometric.loader import DataLoader
-from sklearn.metrics import f1_score, balanced_accuracy_score, confusion_matrix, accuracy_score, precision_score, recall_score
-import numpy as np
-from sklearn.metrics import classification_report
-import pandas as pd
-from repositories.graphs.pyg_builder import y_labels
-import logging
-from torch_geometric.nn import SAGEConv, global_mean_pool, global_max_pool, GINConv
-from torch_geometric.data import Batch
+from torch_geometric.nn import (
+    HGTConv,
+    Linear,
+    global_max_pool,
+)
 
-import os
+# Local application/library specific imports
+from repositories.graphs.pyg_builder import y_labels, y_bin_labels
 
 logging.info("Imported y_labels in gnn.py: %s", y_labels)
+logging.info("Imported y_bin_labels in gnn.py: %s", y_bin_labels)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 seed = 42
 torch.manual_seed(seed)
 np.random.seed(seed)
 y_anomaly_labels = y_labels[1:]  # Exclude normal class (0)
 
-# class GNNClassifierModel(nn.Module):
-#     """GNN model for anomaly detection.  It is supervised model,
-#     which classifies each graph as normal, MITM, DoS, scan, physical fault, anomaly"""
+logging.info("Imported y_labels in gnn.py: %s", y_labels)
+logging.info("Imported y_bin_labels in gnn.py: %s", y_bin_labels)
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+seed = 42
+torch.manual_seed(seed)
+np.random.seed(seed)
+y_anomaly_labels = y_labels[1:]  # Exclude normal class (0)
 
-#     def __init__(self, config: Dict[str, Any], in_channels: int=51, out_channels: int=1):
-#         super(GNNClassifierModel, self).__init__()
-#         self.config = config
-#         hd = config.get("hidden_dim", 32)
-#         # self.conv1 = SAGEConv(in_channels, hd)
-#         # self.bn1 = nn.BatchNorm1d(hd)
-#         # self.conv2 = SAGEConv(hd, hd)
-#         # self.bn2 = nn.BatchNorm1d(hd)
-#         # self.dropout = config.get("dropout", 0.5)
-#         # self.out = nn.Linear(hd, out_channels)
-#         # self.lin1 = nn.Linear(hd, hd)
+class GNNHeteroEncoderModel(nn.Module):
+    """GNN module to produce node embeddings for heterogeneous graphs."""
+    def __init__(self, config: Dict[str, Any], metadata=None):
+        super(GNNHeteroEncoderModel, self).__init__()
+        if metadata is None:
+            raise ValueError("Metadata must be provided for heterogeneous graphs.")
+        self.metadata = metadata
+        self.config = config
 
-#         mlp1 = nn.Sequential(
-#             nn.Linear(in_channels, hd),
-#             nn.ReLU(),
-#             nn.Linear(hd, hd)
-#         )
+        hd    = config.get("hidden_dim", 32)
+        heads = config.get("num_heads", 4)
 
-#         mlp2 = nn.Sequential(
-#             nn.Linear(hd, hd),
-#             nn.ReLU(),
-#             nn.Linear(hd, hd)
-#         )
-#         self.conv1 = GINConv(mlp1)
-#         self.bn1 = nn.BatchNorm1d(hd)
+        # Which node types to pool over (you can override via config)
+        self.pooled_types: List[str] = config.get("pooled_types", ["Measurements", "Connections", "Endpoints", "Assets"])
 
-#         self.conv2 = GINConv(mlp2)
-#         self.bn2 = nn.BatchNorm1d(hd)
+        # Per-node-type input projection to a shared hidden dim
+        self.lin_dict = nn.ModuleDict()
+        for node_type in self.metadata[0]:
+            self.lin_dict[node_type] = Linear(-1, hd)
 
-#         self.dropout = config.get("dropout", 0.5)
-#         self.lin1 = nn.Linear(hd, hd)
-#         self.out = nn.Linear(hd, out_channels)
-        
-#         self.to(DEVICE)
+        # HGT backbone
+        self.conv1 = HGTConv(hd, hd, metadata=self.metadata, heads=heads)
+        self.conv2 = HGTConv(hd, hd, metadata=self.metadata, heads=1)
+
+        self.dropout = float(config.get("dropout", 0.5))
+
+        # Projection after concatenating pooled node-type embeddings
+        pooled_width = hd * max(1, len(self.pooled_types))
+        self.lin1 = Linear(pooled_width, hd)
+
+        self.to(DEVICE)
 
 
-#     def forward(self, data: Data) -> torch.Tensor:
-#         x, edge_index = data.x, data.edge_index
+    def forward(self, data: HeteroData) -> Dict[str, torch.Tensor]:
+        # 1) Type-wise input projections
+        x_dict = {
+            ntype: self.lin_dict[ntype](x).relu()
+            for ntype, x in data.x_dict.items()
+        }
 
-#         x = self.conv1(x, edge_index)
-#         x = self.bn1(x)
-#         x = F.relu(x)
-#         x = F.dropout(x, p=self.dropout, training=self.training)
-#         x = self.conv2(x, edge_index)
-#         x = self.bn2(x)
-#         x = F.relu(x)
-#         x = F.dropout(x, p=self.dropout, training=self.training)
+        # 2) HGT layers
+        x_dict = self.conv1(x_dict, data.edge_index_dict)
+        x_dict = {k: F.relu(v) for k, v in x_dict.items()}
+        x_dict = self.conv2(x_dict, data.edge_index_dict)
+        x_dict = {k: F.relu(v) for k, v in x_dict.items()}
 
-#         # Global pooling (mean) over all nodes in the graph
-#         x = global_max_pool(x, data.batch) 
-#         x = self.lin1(x)
-#         x = F.relu(x)
-#         x = F.dropout(x, p=self.dropout, training=self.training)
-#         x = self.out(x)        
+        # 3) Graph-level pooling over selected node types (robust if missing)
+        pools = []
+        num_graphs = data.num_graphs
+        for ntype in self.pooled_types:
+            if ntype in x_dict and hasattr(data[ntype], "batch"):
+                pools.append(global_max_pool(x_dict[ntype], data[ntype].batch, size=num_graphs))
+            else:
+                # keep dims aligned so concatenation works
+                pools.append(torch.zeros((num_graphs, self.config.get("hidden_dim", 32)), device=x_dict[next(iter(x_dict))].device))
 
-#         return x
+        h = torch.cat(pools, dim=1) if len(pools) > 1 else pools[0]
 
-# Data splitting and sampling
-# def build_data_loaders(dataset):
-#     """Stratified split of dataset into train and test sets based on graph labels."""
-#     logging.info("Building data loaders with stratified split for dataset with %d samples...", len(dataset))
+        # 4) Final MLP + Dropout
+        h = F.relu(self.lin1(F.dropout(h, p=self.dropout, training=self.training)))
+        h = F.dropout(h, p=self.dropout, training=self.training)
+
+        return h
+
+class GNNHeteroClassifierModel(nn.Module):
+    """GNN model for anomaly detection.  It is supervised model,
+    which classifies each graph as normal, MITM, DoS, scan, physical fault, anomaly
+    This will allow for heterogeneous graphs with different node types.
+    """
+
+    def __init__(self, config: Dict[str, Any], metadata=None):
+        super(GNNHeteroClassifierModel, self).__init__()
+        if metadata is None:
+            raise ValueError("Metadata must be provided for heterogeneous graphs.")
+        self.metadata = metadata
+        self.config = config
+
+        hd    = config.get("hidden_dim", 32)
+        heads = config.get("num_heads", 4)
+
+        self.encoder = GNNHeteroEncoderModel(config, metadata)
+
+        # Heads
+        self.bin_head  = nn.Linear(hd, 1)   # -> [B,1] then squeeze to [B]
+        self.anom_head = nn.Linear(hd, 5)   # -> [B,5] (classes: 1..5 shifted to 0..4 in loss)
+
+        self.to(DEVICE)
+
+
+    def forward(self, data: HeteroData) -> torch.Tensor:
+        h = self.encoder(data)   # [B, hd]
+        bin_logits  = self.bin_head(h).squeeze(dim=-1)   # [B]
+        anom_logits = self.anom_head(h)                   # [B, 5]
+
+        return bin_logits, anom_logits
+
+def build_data_loaders(dataset: HeteroData, use_anomaly: bool = True):
+    """Stratified split of dataset into train and test sets based on graph labels."""
+    logging.info("Building data loaders with stratified split for dataset with %d samples...", len(dataset))
     
-#     # Get labels for stratification
-#     labels = [data.y.item() for data in dataset]
-#     class_counts = np.bincount(labels, minlength=len(y_labels))
-#     logging.info("Overall class distribution in dataset: " + ", ".join([f"{y_labels[i]}: {count}" for i, count in enumerate(class_counts)]))
+    # Get labels for stratification
+    labels = [data.y.item() for data in dataset]
+    if not use_anomaly:
+        # Convert to binary labels: 0 (normal) and 1 (anomaly)
+        labels = [0 if label == 0 else 1 for label in labels]
+        logging.info("Using binary labels for stratified splitting.")
+        # convert all data.y to binary in dataset
+        for data in dataset:
+            data.y = torch.tensor([0 if data.y == 0 else 1], dtype=torch.float32)
+            
 
-#     # Ensure each class has at least 15 samples for stratified splitting
-#     need_oversampling = False
-#     for i, count in enumerate(class_counts):
-#         if count < 15:
-#             need_oversampling = True
-#             logging.warning("Class '%s' has only %d samples. Stratified splitting may not be reliable.", y_labels[i], count)
-#             # manually oversample this class in the dataset
-#             samples_to_add = 15 - count
-#             class_samples = [data for data in dataset if data.y.item() == i]
-#             for _ in range(samples_to_add):
-#                 dataset.append(class_samples[np.random.randint(0, len(class_samples))])
-#             logging.info("After oversampling, dataset size is %d samples.", len(dataset))
-#     if need_oversampling:
-#         # Recompute labels after oversampling
-#         labels = [data.y.item() for data in dataset]
-#         class_counts = np.bincount(labels, minlength=len(y_labels))
-#         logging.info("New Overall class distribution in dataset: " + ", ".join([f"{y_labels[i]}: {count}" for i, count in enumerate(class_counts)]))
+    # split dataset for 60% train, 40% validation/final test
+    splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.4, random_state=seed)
 
-#     # split dataset for 60% train, 40% validation/final test
-#     splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.4, random_state=seed)
+    train_idx, test_idx = next(splitter.split(np.zeros(len(labels)), labels))
 
-#     train_idx, test_idx = next(splitter.split(np.zeros(len(labels)), labels))
+    # further split test into 20% validation and 20% final test
+    splitter2 = StratifiedShuffleSplit(n_splits=1, test_size=0.5, random_state=seed)
+    test_labels = [labels[i] for i in test_idx]    
+    # get anomaly indices in train set, oversample them in training set    
+    anomaly_train_idx = [i for i in train_idx if dataset[i].y > 0]
+    # counts for each anomaly class in training set, excluding normal class (0)
+    anomaly_counts = np.bincount([labels[i] for i in anomaly_train_idx], minlength=len(y_labels[1:]))
+    max_count = max(anomaly_counts)  # exclude normal class (0)
+    logging.info("Anomaly counts in training set before oversampling: " + ", ".join([f"{y_labels[i]}: {count}" for i, count in enumerate(anomaly_counts)]))
 
-#     # further split test into 20% validation and 20% final test
-#     splitter2 = StratifiedShuffleSplit(n_splits=1, test_size=0.5, random_state=seed)
-#     test_labels = [labels[i] for i in test_idx]
-#     relative_val_idx, relative_final_test_idx = next(splitter2.split(np.zeros(len(test_idx)), test_labels))
-
-#     # Map relative indices back to original test indices
-#     val_idx = [test_idx[i] for i in relative_val_idx]
-#     final_test_idx = [test_idx[i] for i in relative_final_test_idx]
-
-#     # check distribution in each split
-#     test_counts = np.bincount(test_labels, minlength=len(y_labels))
-#     val_labels = [labels[i] for i in val_idx]
-#     val_counts = np.bincount(val_labels, minlength=len(y_labels))
-#     final_test_labels = [labels[i] for i in final_test_idx]
-#     final_test_counts = np.bincount(final_test_labels, minlength=len(y_labels))
-
-#     logging.info("Overall label distribution: " + ", ".join([f"{y_labels[i]}: {count}" for i, count in enumerate(np.bincount(labels, minlength=len(y_labels)))]))
-#     logging.info("Train label distribution: " + ", ".join([f"{y_labels[i]}: {count}" for i, count in enumerate(np.bincount([labels[i] for i in train_idx], minlength=len(y_labels)))]))
-#     logging.info("Validation label distribution: " + ", ".join([f"{y_labels[i]}: {count}" for i, count in enumerate(val_counts)]))
-#     logging.info("Final test label distribution: " + ", ".join([f"{y_labels[i]}: {count}" for i, count in enumerate(final_test_counts)]))
-
-#     # Handling class imbalance with weighted random sampler did not help much,
-#     # will oversample minority classes manually instead.
-#     # This is for training set only
-#     #train_labels = [np.array(labels)[train_idx][i] for i in range(len(train_idx))]
-#     #class_counts = np.bincount(train_labels, minlength=len(y_labels))
-#     #max_count = class_counts.max()
-#     # oversampled_train_idx = []
-#     # for i in range(len(y_labels)):
-#     #     if class_counts[i] == 0:
-#     #         continue
-#     #     # Find all indices of this class in the training set
-#     #     class_indices = [idx for idx, label in zip(train_idx, train_labels) if label == i]
-#     #     # Oversample to match max_count
-#     #     oversampled = np.random.choice(class_indices, max_count, replace=True)
-#     #     oversampled_train_idx.extend(oversampled.tolist())
-#     # np.random.shuffle(oversampled_train_idx)
-
-#     logging.info("Train set size: %d, Validation set size: %d, Final test set size: %d", len(train_idx), len(val_idx), len(final_test_idx))
-#     #train_set = Subset(dataset, oversampled_train_idx)
-#     train_set = Subset(dataset, train_idx)
-#     val_set = Subset(dataset, val_idx)
-#     final_test_set = Subset(dataset, final_test_idx)
-
-#     # ---------- commented out weighted random sampler -------------
-#     #class_sample_count = np.array([len(np.where(np.array(train_labels) == t)[0]) for t in np.unique(train_labels)])
-    
+    # Oversample anomalies in the training set
+    for i, count in enumerate(anomaly_counts):
+        if count == 0:
+            continue
+        target_count = max_count
+        current_count = count
+        needed = target_count - current_count
+        if needed <= 0:
+            continue
+        anomaly_class = i + 1  # since anomaly_counts excludes normal class (0)
+        anomaly_indices = [idx for idx in anomaly_train_idx if labels[idx] == anomaly_class]
+        if not anomaly_indices:
+            continue
+        oversampled_indices = np.random.choice(anomaly_indices, size=needed, replace=True)
+        anomaly_train_idx = np.concatenate([anomaly_train_idx, oversampled_indices])
 
 
-#     # Compute class weights
-#     #weights = get_weights(train_labels, min_num_classes=len(y_labels))
-#     #sampler_weights = torch.tensor([weights[int(t)] for t in train_labels], dtype=torch.double)
+    relative_val_idx, relative_final_test_idx = next(splitter2.split(np.zeros(len(test_idx)), test_labels))
 
-#     #sampler = WeightedRandomSampler(sampler_weights, len(sampler_weights))
-#     # ---------------------------------------------------------------
+    # Map relative indices back to original test indices
+    val_idx = [test_idx[i] for i in relative_val_idx]
+    final_test_idx = [test_idx[i] for i in relative_final_test_idx]
 
-#     # create loaders
-#     train_loader = DataLoader(train_set, batch_size=32, shuffle=True, num_workers=0)
-#     val_loader = DataLoader(val_set, batch_size=32, shuffle=False, num_workers=0)
-#     final_test_loader = DataLoader(final_test_set, batch_size=32, shuffle=False, num_workers=0)
+    # check distribution in each split
+    if use_anomaly:
+        test_counts = np.bincount(test_labels, minlength=len(y_labels))
+        val_labels = [labels[i] for i in val_idx]
+        val_counts = np.bincount(val_labels, minlength=len(y_labels))
+        final_test_labels = [labels[i] for i in final_test_idx]
+        final_test_counts = np.bincount(final_test_labels, minlength=len(y_labels))
 
-#     return train_loader, val_loader, final_test_loader
+        logging.info("Overall label distribution: " + ", ".join([f"{y_labels[i]}: {count}" for i, count in enumerate(np.bincount(labels, minlength=len(y_labels)))]))
+        logging.info("Train label distribution: " + ", ".join([f"{y_labels[i]}: {count}" for i, count in enumerate(np.bincount([labels[i] for i in train_idx], minlength=len(y_labels)))]))
+        logging.info("Validation label distribution: " + ", ".join([f"{y_labels[i]}: {count}" for i, count in enumerate(val_counts)]))
+        logging.info("Final test label distribution: " + ", ".join([f"{y_labels[i]}: {count}" for i, count in enumerate(final_test_counts)]))
+    else:
+        test_counts = np.bincount(test_labels, minlength=len(y_bin_labels))
+        val_labels = [labels[i] for i in val_idx]
+        val_counts = np.bincount(val_labels, minlength=len(y_bin_labels))
+        final_test_labels = [labels[i] for i in final_test_idx]
+        final_test_counts = np.bincount(final_test_labels, minlength=len(y_bin_labels))
+
+        logging.info("Overall label distribution: " + ", ".join([f"{y_bin_labels[i]}: {count}" for i, count in enumerate(np.bincount(labels, minlength=len(y_bin_labels)))]))
+        logging.info("Train label distribution: " + ", ".join([f"{y_bin_labels[i]}: {count}" for i, count in enumerate(np.bincount([labels[i] for i in train_idx], minlength=len(y_bin_labels)))]))
+        logging.info("Validation label distribution: " + ", ".join([f"{y_bin_labels[i]}: {count}" for i, count in enumerate(val_counts)]))
+        logging.info("Final test label distribution: " + ", ".join([f"{y_bin_labels[i]}: {count}" for i, count in enumerate(final_test_counts)]))
+
+    logging.info("Train set size: %d, Validation set size: %d, Final test set size: %d", len(train_idx), len(val_idx), len(final_test_idx))
+    #train_set = Subset(dataset, oversampled_train_idx)
+    train_set = Subset(dataset, train_idx)
+    anomaly_train_set = Subset(dataset, [i for i in anomaly_train_idx])
+    val_set = Subset(dataset, val_idx)
+    anomaly_val_set = Subset(dataset, [i for i in val_idx if dataset[i].y > 0])
+    final_test_set = Subset(dataset, final_test_idx)
+
+    # create loaders
+    train_loader = DataLoader(train_set, batch_size=32, shuffle=True, num_workers=0)
+    anom_train_loader = DataLoader(anomaly_train_set, batch_size=32, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_set, batch_size=32, shuffle=False, num_workers=0)
+    anom_val_loader = DataLoader(anomaly_val_set, batch_size=32, shuffle=False, num_workers=0)
+    final_test_loader = DataLoader(final_test_set, batch_size=32, shuffle=False, num_workers=0)
+
+    return train_loader, anom_train_loader, val_loader, anom_val_loader, final_test_loader
 
 def get_criterion(data_loader: DataLoader) -> nn.Module:
     """Get loss function with class weights to handle class imbalance."""
@@ -248,12 +302,14 @@ def train_epoch(model: nn.Module, loader: DataLoader, criterion: Tuple[nn.Module
 
             bin_preds = (torch.sigmoid(bin_logits) >= 0.5).long()
             pred = bin_preds.clone()
-            if mask.any():
+            if use_anomaly and mask.any():
                 anom_preds = anom_logits[mask].argmax(dim=1) + 1
                 pred[mask] = anom_preds
 
             y_all.extend(y.detach().cpu().tolist())
             y_pred_all.extend(pred.detach().cpu().tolist())
+        logging.info("y_all so far: %s", y_all)
+        logging.info("y_pred_all so far: %s", y_pred_all)
 
         mean_loss = total_loss / max(1, total_num)
         return get_label_metrics(y_all, y_pred_all, mean_loss)
@@ -315,7 +371,7 @@ def evaluate_model(model: nn.Module, loader: DataLoader, criterion: Tuple[nn.Mod
         total_num += y.size(0)
         bin_preds = (torch.sigmoid(bin_logits) >= 0.5).long()
         pred = bin_preds.clone()
-        if mask.any():
+        if use_anomaly and mask.any():
             anom_preds = anom_logits[mask].argmax(dim=1) + 1
             pred[mask] = anom_preds
         y_all.extend(y.detach().cpu().tolist())
@@ -377,10 +433,9 @@ def fit_model(model: nn.Module,
     # Load best model state
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
-
-    # Stage 2: Train with anomaly head only for anomaly samples, freeze binary head
-    # unfreeze anomaly head, freeze binary head and encoder
     if use_anomaly:
+        # Stage 2: Train with anomaly head only for anomaly samples, freeze binary head
+        # unfreeze anomaly head, freeze binary head and encoder
         logging.info("Stage 2: Training with anomaly head only for %d epochs...", config.get("stage2_epochs", 10))
         for param in model.bin_head.parameters():
             param.requires_grad = False
@@ -442,14 +497,14 @@ def fit_model(model: nn.Module,
             model.load_state_dict(best_model_state)
 
     # Calculate final training metrics
-    final_train_metrics = evaluate_model(model, train_loader, (bin_criterion, anom_criterion),use_anomaly=use_anomaly)
+    final_train_metrics = evaluate_model(model, train_loader, (bin_criterion, anom_criterion), use_anomaly=use_anomaly)
     logging.info("Final Training Metrics - Loss: %.4f, F1: %.4f, Recall: %.4f, Precision: %.4f, Balanced Acc: %.4f, Accuracy: %.4f",
                  final_train_metrics["loss"], final_train_metrics["f1_score"], final_train_metrics["recall"],
                  final_train_metrics["precision"], final_train_metrics["balanced_accuracy"], final_train_metrics["accuracy"])
 
     return model, (bin_criterion, anom_criterion), final_train_metrics
 
-def test_model(model: nn.Module, test_loader: DataLoader, criteria: Tuple[nn.Module, nn.Module], test_description: str="Final Test Set"):
+def test_model(model: nn.Module, test_loader: DataLoader, criteria: Tuple[nn.Module, nn.Module], test_description: str="Final Test Set", use_anomaly: bool = True):
     """Evaluate the trained model on the final test set and print classification report."""
     bin_criterion, anom_criterion = criteria
     test_metrics = evaluate_model(model, test_loader, criteria)
@@ -473,7 +528,7 @@ def test_model(model: nn.Module, test_loader: DataLoader, criteria: Tuple[nn.Mod
         if bin_criterion is not None:
             lossA = bin_criterion(bin_logits, y_bin.float())
             loss = loss + lossA
-        if anom_criterion is not None and mask.any():
+        if use_anomaly and anom_criterion is not None and mask.any():
             y5 = (y[mask] - 1).long()
             lossB = anom_criterion(anom_logits[mask], y5)
             loss = loss + lossB
@@ -485,10 +540,19 @@ def test_model(model: nn.Module, test_loader: DataLoader, criteria: Tuple[nn.Mod
         if use_anomaly and mask.any():
             anom_preds = anom_logits[mask].argmax(dim=1) + 1
             pred[mask] = anom_preds
-        y_all.extend(y.detach().cpu().tolist())
-        y_pred_all.extend(pred.detach().cpu().tolist())
-
-    report_df = pd.DataFrame(classification_report(y_all, y_pred_all, output_dict=True)).transpose()
+        
+        #use the right labels for report
+        if use_anomaly:
+            logging.info("Batch true labels (multi-class): %s", y.detach().cpu().tolist())
+            y_all.extend(y.detach().cpu().tolist())
+            y_pred_all.extend(pred.detach().cpu().tolist())
+        else:
+            logging.info("Batch true labels (binary): %s", y_bin.detach().cpu().tolist())
+            y_all.extend(y_bin.detach().cpu().tolist())
+            y_pred_all.extend(bin_preds.detach().cpu().tolist())
+    target_names = y_labels if use_anomaly else ['Normal', 'Anomaly']
+    logging.info(f"yall: {y_all}, ypredall: {y_pred_all}")
+    report_df = pd.DataFrame(classification_report(y_all, y_pred_all, target_names=target_names, output_dict=True)).transpose()
     report_df.to_csv(f"./exports/results/classification_report_{test_description}.csv")
 
     return test_metrics
@@ -534,69 +598,3 @@ class GNNEarlyStopping:
                 self.early_stop = True
                     
         return self.early_stop
-
-# @torch.no_grad()
-# def compute_metrics(logits: torch.Tensor, y: torch.Tensor):
-#     #y_pred = logits.argmax(dim=1).detach().cpu().numpy()
-#     y_actual = y.detach().cpu().numpy().astype(np.int32)
-    
-#     probs = torch.sigmoid(logits).squeeze(1)
-#     y_pred = (probs >= 0.5).long().detach().cpu().numpy()
-
-#     # Overall F1 score for anomaly classes only (exclude normal class 0)
-    
-#     balanced_accuracy = balanced_accuracy_score(y_actual, y_pred)
-
-#     # additional metrics for comparing with previous works
-#     accuracy_val = accuracy_score(y_actual, y_pred)
-#     precision_val = precision_score(y_actual, y_pred, average='binary', zero_division=0)
-#     recall_val = recall_score(y_actual, y_pred, average='binary', zero_division=0)
-#     f1_score_val = f1_score(y_actual, y_pred, average='binary', zero_division=0)
-
-#     return {        
-#         "balanced_accuracy": balanced_accuracy,
-#         "accuracy": accuracy_val,
-#         "precision": precision_val,
-#         "recall": recall_val,
-#         "f1_score": f1_score_val
-#     }
-
-# @torch.no_grad()
-# def validate_dataset_integrity(dataset: torch.utils.data.Dataset):
-#     """Validate that all graphs in the dataset have valid labels."""
-#     invalid_count = 0
-#     logging.info("Validating dataset integrity for %d graphs...", len(dataset))
-#     for i, data in enumerate(dataset):
-#         if data is None:
-#             logging.warning("Data at index %d is None.", i)
-#             invalid_count += 1
-#             continue
-#         if not hasattr(data, 'x') or data.x is None:
-#             logging.warning("Data at index %d has no node features.", i)
-#             invalid_count += 1
-#             continue
-#         if not hasattr(data, 'y') or data.y is None:
-#             logging.warning("Data at index %d has no label.", i)
-#             invalid_count += 1
-#             continue
-#         if not hasattr(data, 'edge_index') or data.edge_index is None:
-#             logging.warning("Data at index %d has no edge_index.", i)
-#             invalid_count += 1
-#             continue
-#         if data.x.shape[0] == 0 and data.num_nodes == 0:
-#             logging.warning("Data at index %d has zero nodes.", i)
-#             invalid_count += 1
-#             continue
-        
-#         # check if data can load into batch
-#         try:
-#             Batch.from_data_list([data])
-#         except Exception as e:
-#             logging.warning("Data at index %d errors on Batch load with device %s: %s", i, DEVICE, str(e))
-#             invalid_count += 1
-#             continue
-
-#     if invalid_count == 0:
-#         logging.info("All graphs in the dataset have valid labels.")
-#     else:
-#         logging.warning("%d graphs with invalid labels found in the dataset.", invalid_count)

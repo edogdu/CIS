@@ -55,8 +55,8 @@ class AggregateRepository:
                     for row in rows:
                         all_labels.extend(row['labels'])
                     # Normalize labels to "normal" and "anomaly"
-                    for i in range(len(all_labels)):
-                        all_labels[i] = all_labels[i] if all_labels[i] == "normal" else "anomaly"
+                    # for i in range(len(all_labels)):
+                    #     all_labels[i] = all_labels[i] if all_labels[i] == "normal" else "anomaly"
                     all_labels = list(set(all_labels))
                     return all_labels
                 else:
