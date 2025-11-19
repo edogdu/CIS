@@ -17,13 +17,14 @@ torch
 torch-geometric
 
 joblib
-
+seaborn
+matplotlib
 
 # Explainable AI (XAI)
 shap
 lime
 #Torch Geometric Explainer is integrated into torch-geometric
-
+captum
 
 # Other utilities
 python-dotenv

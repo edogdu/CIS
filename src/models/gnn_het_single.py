@@ -19,6 +19,7 @@ from sklearn.metrics import (
     recall_score,
     confusion_matrix
 )
+from sklearn.utils.class_weight import compute_class_weight
 from sklearn.model_selection import StratifiedShuffleSplit
 from torch.utils.data import Subset, WeightedRandomSampler
 from torch_geometric.data import Batch, Data, HeteroData
@@ -28,13 +29,16 @@ from torch_geometric.nn import (
     Linear,
     global_max_pool,
 )
+import json
+from torch_geometric.explain import Explainer, GNNExplainer, HeteroExplanation
+from repositories.graphs.pyg_builder import get_hetero_column_names # for GNNExplainer feature names
 import copy
-from captum.attr import IntegratedGradients, Saliency, DeepLift
+from captum.attr import IntegratedGradients
 from functools import partial
-from repositories.graphs.pyg_builder import y_labels, get_hetero_column_names
+from repositories.graphs.pyg_builder import y_labels
 import matplotlib.pyplot as plt
 import seaborn as sns
-import json
+
 
 # Local application/library specific imports
 
@@ -45,9 +49,6 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 seed = 42
 torch.manual_seed(seed)
 np.random.seed(seed)
-y_anomaly_labels = y_labels[1:]  # Exclude normal class (0)
-
-logging.info("Imported y_anomaly_labels in gnn_het.py: %s", y_anomaly_labels)
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 seed = 42
@@ -150,10 +151,12 @@ class GNNHeteroEncoderModel(nn.Module):
             self.lin_dict[node_type] = Linear(-1, hd)
 
         # HGT backbone
-        self.conv_layers = config.get("num_layers", 2)
+        self.num_layers = config.get("num_layers", 3)
+
         self.convs = nn.ModuleList()
-        for i in range(self.conv_layers):
+        for _ in range(self.num_layers):
             self.convs.append(HGTConv(hd, hd, metadata=self.metadata, heads=heads))
+
         self.dropout = float(config.get("dropout", 0.5))
 
         # Projection after concatenating pooled node-type embeddings
@@ -165,6 +168,7 @@ class GNNHeteroEncoderModel(nn.Module):
 
     def forward(self, data: HeteroData) -> Dict[str, torch.Tensor]:
         # 1) Type-wise input projections
+        
         x_dict = {
             ntype: self.lin_dict[ntype](x).relu()
             for ntype, x in data.x_dict.items()
@@ -211,18 +215,92 @@ class GNNHeteroClassifierModel(nn.Module):
 
         self.encoder = GNNHeteroEncoderModel(config, metadata)
 
-
-        self.out = nn.Linear(hd, 5)   # -> [B,5] (classes: 1..5 shifted to 0..4 in loss)
+        
+        self.out = nn.Linear(hd, 6)   # -> [B,5] (classes: 1..5 shifted to 0..4 in loss)
 
         self.to(DEVICE)
 
 
-    def forward(self, data: HeteroData) -> torch.Tensor:
+    def forward(self, x_or_data, edge_index_dict=None) -> torch.Tensor:
+
+        if isinstance(x_or_data, HeteroData):
+            data = x_or_data
+        else:
+            # Assume x_or_data is a dict of node feature tensors
+            data = HeteroData()
+            for ntype in x_or_data.keys():
+                data[ntype].x = x_or_data[ntype]
+            data.edge_index_dict = edge_index_dict            
+
         h = self.encoder(data)
         logits = self.out(h)                   # [B, 5]
         return logits
         
+    def build_data_loaders(self, dataset: HeteroData):
+        """Stratified split of dataset into train and test sets based on graph labels."""
+        logging.info("Building data loaders with stratified split for dataset with %d samples...", len(dataset))
         
+        logging.info("Creating  binary dataset...")
+        # Get labels for stratification
+        labels = [data.y.item() for data in dataset]
+        class_counts = np.bincount(labels, minlength=len(y_labels))
+        logging.info("Original class distribution: " + ", ".join([f"{y_labels[i]}: {count}" for i, count in enumerate(class_counts)]))
+        # make sure each class has at least 8 samples for stratified splitting
+        min_samples = 8
+        for i, count in enumerate(class_counts):
+            if 0 < count < min_samples:
+                logging.warning(f"Class {y_labels[i]} has only {count} samples, which is less than the minimum required {min_samples}.")
+                # Over-sample this class by duplicating samples
+                needed = min_samples - count
+                # copy needed random samples from this class
+                class_samples = [idx for idx, label in enumerate(labels) if label == i]
+                for _ in range(needed):
+                    sample_idx = np.random.choice(class_samples)
+                    dataset.append(copy.deepcopy(dataset[sample_idx]))
+                    labels.append(i)
+
+
+        # split dataset for 60% train, 40% validation/final test
+        splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.4, random_state=seed)
+
+        train_idx, test_idx = next(splitter.split(np.zeros(len(labels)), labels))
+
+        # further split test into 20% validation and 20% final test
+        splitter2 = StratifiedShuffleSplit(n_splits=1, test_size=0.5, random_state=seed)
+        test_labels = [labels[i] for i in test_idx]
+
+        relative_val_idx, relative_final_test_idx = next(splitter2.split(np.zeros(len(test_idx)), test_labels))
+
+        # Map relative indices back to original test indices
+        val_idx = [test_idx[i] for i in relative_val_idx]
+        final_test_idx = [test_idx[i] for i in relative_final_test_idx]
+        
+        train_set = Subset(dataset, train_idx)
+        val_set = Subset(dataset, val_idx)
+        final_test_set = Subset(dataset, final_test_idx)
+
+        class_weights = self.get_weights(labels, min_num_classes=5)
+        sampler = WeightedRandomSampler(weights=class_weights, num_samples=len(train_set))
+
+        # create loaders
+        #train_loader = DataLoader(train_set, batch_size=32, num_workers=0, sampler=sampler)
+        train_loader = DataLoader(train_set, batch_size=32, shuffle=True, num_workers=0)
+        val_loader = DataLoader(val_set, batch_size=32, shuffle=False, num_workers=0)
+        final_test_loader = DataLoader(final_test_set, batch_size=32, shuffle=False, num_workers=0)
+
+        # Create export csv of split counts for each class for each subset
+        logging.info("Exporting data split counts to ./exports/results/gnn_het_data_split_counts.csv")
+        original_counts = {
+            'Overall': np.bincount(labels, minlength=len(y_labels)),
+            'Train': np.bincount([labels[i] for i in train_idx], minlength=len(y_labels)),
+            'Validation': np.bincount([labels[i] for i in val_idx], minlength=len(y_labels)),
+            'Final Test': np.bincount([labels[i] for i in final_test_idx], minlength=len(y_labels)),
+        }
+        with open("./exports/results/gnn_het_data_split_counts.csv", "w") as f:
+            f.write("Class," + ",".join(y_labels) + "\n")
+            for split, counts in original_counts.items():
+                f.write(split + "," + ",".join(str(count) for count in counts) + "\n")
+        return (train_loader, val_loader), final_test_loader    
 
     def get_criterion(self, data_loader: DataLoader) -> nn.Module:
         """Get loss function with class weights to handle class imbalance."""
@@ -282,7 +360,6 @@ class GNNHeteroClassifierModel(nn.Module):
         
         #logging.info("Epoch Train Loss: %.4f, Mean Anomaly Macro F1: %.4f, Mean Macro F1: %.4f, Mean Balanced Acc: %.4f",
         #             mean_loss, mean_anomaly_macro_f1, mean_macro_f1, mean_balanced_acc)
-    
     def get_label_metrics(self, y_true, y_pred, mean_loss, export_results: bool = False, is_final_test: bool = False):
         """Calculate classification metrics for labels."""        
 
@@ -293,7 +370,7 @@ class GNNHeteroClassifierModel(nn.Module):
         balanced_accuracy = balanced_accuracy_score(y_true, y_pred)
 
         if export_results:
-            with open(f"./exports/results/{'final_' if is_final_test else ''}gnn_het_multi_classify_perf_scores.csv", "w") as f:
+            with open(f"./exports/results/{'final_' if is_final_test else ''}gnn_het_multi_classification_perf_scores.csv", "w") as f:
                 f.write("Metric,Value\n")
                 f.write(f"loss,{mean_loss}\n")
                 f.write(f"precision,{precision_val}\n")
@@ -345,18 +422,6 @@ class GNNHeteroClassifierModel(nn.Module):
         anom_logits = self(batch)      # [B,5]
         pred = anom_logits.argmax(dim=1)
         return pred.detach().cpu().tolist()
-    
-    def _verify_labels_in_loader(self, loader: DataLoader):
-        """Verify that all anomaly classes are present in the DataLoader."""
-        present_labels = set()
-        for batch in loader:
-            present_labels.update(batch.y.view(-1).long().cpu().numpy().tolist())
-        
-        missing_labels = set(range(5)) - present_labels
-        if missing_labels:
-            logging.warning("Warning: The following anomaly classes are missing in the DataLoader: %s", missing_labels)
-        else:
-            logging.info("All anomaly classes are present in the DataLoader.")
 
     def fit_model(self, 
                 train_loader: DataLoader,  
@@ -367,11 +432,9 @@ class GNNHeteroClassifierModel(nn.Module):
         learning_rate = config.get("learning_rate", 0.001)
         patience = config.get("early_stopping_patience", 10)
         min_delta = config.get("early_stopping_min_delta", 0.0001)
-        weight_decay = config.get("weight_decay", 0.0001)
-        self._verify_labels_in_loader(train_loader)
-        self._verify_labels_in_loader(val_loader)
+
         criterion = self.get_criterion(train_loader)
-        optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)
 
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='max', factor=0.1, patience=5, min_lr=1e-5)
@@ -383,11 +446,11 @@ class GNNHeteroClassifierModel(nn.Module):
         
 
         
-        for epoch in range(num_epochs):
+        for epoch in range(config.get("stage2_epochs", 100)):
             train_metrics = self.train_epoch(train_loader, optimizer)
             val_metrics = self.evaluate_model(val_loader)
-            logging.info("Stage 2 Epoch %d: Train Loss: %.4f, Val Loss: %.4f, Val F1: %.4f",
-                        epoch+1, train_metrics["loss"], val_metrics["loss"], val_metrics[early_stop_metric])
+            logging.info("Stage 2 Epoch %d: Train Loss: %.4f, Val Loss: %.4f",
+                        epoch+1, train_metrics["loss"], val_metrics["loss"])
             scheduler.step(val_metrics[early_stop_metric])
             # Check for early stopping
             if best_val_metrics is None or (early_stop_mode == 'max' and val_metrics[early_stop_metric] > best_val_metrics[early_stop_metric]) or (early_stop_mode == 'min' and val_metrics[early_stop_metric] < best_val_metrics[early_stop_metric]):
@@ -426,7 +489,7 @@ class GNNHeteroClassifierModel(nn.Module):
         total_num = 0
         for batch in test_loader:
             batch = batch.to(DEVICE)
-            anom_logits = self(batch)      # [B], [B,4]
+            anom_logits = self(batch)      # [B], [B,5]
             y = batch.y.view(-1).long()
 
             loss = self.criterion(anom_logits, y)
@@ -438,25 +501,19 @@ class GNNHeteroClassifierModel(nn.Module):
         
         # Get Explainability for all anomaly predictions
         for i in range(len(y_pred_all)):
-            # These are all anomaly predictions, so explain all
-            logging.info("Generating explanation for test sample %d with true label %d and predicted label %d.", i, y_all[i], y_pred_all[i])
-            data = test_loader.dataset[i]
-            explainer_results = self.explain_with_captum(data)
+            if y_pred_all[i] > 0:
+                logging.info("Generating explanation for test sample %d with predicted class %d (%s)", i, y_pred_all[i], y_labels[y_pred_all[i]])
+                data = test_loader.dataset[i]
+                explainer_results = self.explain_with_captum(data)
+                # Save or log explainer_results as needed
 
-        # shift back y_all and y_pred_all to original labels (1-4)   
-        logging.info("y_all before shifting: %s", y_all)
-        logging.info("y_pred_all before shifting: %s", y_pred_all)           
         self.get_label_metrics(y_all, y_pred_all, total_loss / max(1, total_num), export_results=True)
-        logging.info("Generated classification report and saved to CSV.")
-        expected_labels = list(range(len(y_anomaly_labels)))
-        logging.info("Expected labels for classification report: %s", expected_labels)
-        report = classification_report(y_all, y_pred_all, labels=expected_labels, target_names=y_anomaly_labels, zero_division=0, output_dict=True)
+        report = classification_report(y_all, y_pred_all, target_names=y_labels, zero_division=0, output_dict=True)
         report_df = pd.DataFrame(report).transpose()
         report_df.to_csv(f"./exports/results/classification_report_classify_{test_description}.csv")
-        logging.info("Classification Report complete and saved.")
+
                 # Confusion Matrix
         
-        logging.info("Generating confusion matrix for %s.", test_description)
         # save confusion matrix image
         cm = confusion_matrix(y_all, y_pred_all)
         # add timestamp to filename to avoid overwriting
@@ -467,7 +524,6 @@ class GNNHeteroClassifierModel(nn.Module):
         plt.ylabel("True")
         plt.savefig(f"./exports/images/gnn_het_classification_classify_confusion_matrix{int(time.time())}.png")
         plt.close()
-        logging.info("Confusion matrix saved.")
         
 
         return y_all, y_pred_all
@@ -480,11 +536,8 @@ class GNNHeteroClassifierModel(nn.Module):
         weights = 1.0 / counts
         weights = weights / np.sum(weights) * len(counts)  # normalize
         weights[~np.isfinite(weights)] = epsilon  # handle any inf or nan
-        # square root to reduce extreme weights
-        weights = np.sqrt(weights)
-        
         return weights
-    
+
     def explain_with_captum(self, data: HeteroData):
         """Generate explanations for the model's predictions using Captum.
         We assume prediction has already been made and is an anomaly.
@@ -498,7 +551,7 @@ class GNNHeteroClassifierModel(nn.Module):
             anom_logits = self(batch)
             pred = anom_logits.argmax(dim=1).item()
         
-        logging.info("Model prediction for explanation: class %d (%s)", pred, y_anomaly_labels[pred])
+        logging.info("Model prediction for explanation: class %d (%s)", pred, y_labels[pred])
 
         # Prepare inputs for Captum
         # Use the original single graph data (not batch) for the wrapper
@@ -542,10 +595,10 @@ class GNNHeteroClassifierModel(nn.Module):
             logging.error("Traceback:", exc_info=True)
             return None
 
-        # 5. Process and save the results
+        # Process and save the results
         explanation_results = {
             "predicted_class": pred,
-            "predicted_label": y_anomaly_labels[pred],
+            "predicted_label": y_labels[pred],
             "node_feat_mask": {},  # For feature importance
             "node_importance": {}  # For node importance
         }
@@ -587,7 +640,7 @@ class GNNHeteroClassifierModel(nn.Module):
                 plt.xticks(range(len(feature_importance_summary)), feature_names, rotation=45, ha='right')
                 plt.xlabel('Features')
                 plt.ylabel('Importance (Average Absolute Attribution)')
-                plt.title(f'Feature Importance for {ntype} (Prediction: {y_anomaly_labels[pred]})')
+                plt.title(f'Feature Importance for {ntype} (Prediction: {y_labels[pred]})')
                 plt.tight_layout()
                 plt.savefig(f'./exports/images/gnn_het_captum_node_feat_importance_{ntype}_{int(time.time())}.png', dpi=150)
                 plt.close()
@@ -603,13 +656,14 @@ class GNNHeteroClassifierModel(nn.Module):
                         logging.info(f"    - {feat_name}: {top_feats.values[i].item():.4f}")
 
         # Save explanation results to JSON
-        output_path = f'./exports/results/gnn_het_captum_classify_explanation_{int(time.time())}.json'
+        output_path = f'./exports/results/gnn_het_captum_explanation_{int(time.time())}.json'
         with open(output_path, 'w') as f:
             json.dump(explanation_results, f, indent=2)
         
         logging.info(f"Explanation results saved to {output_path}")
         
         return explanation_results
+        
 
 class GNNEarlyStopping:
     """Early stopping utility to stop training when 

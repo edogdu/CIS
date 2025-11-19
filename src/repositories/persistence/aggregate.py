@@ -42,11 +42,16 @@ class AggregateRepository:
         query = f"""
         SELECT attack_types AS labels
         FROM scada_agg_{duration}s
-        WHERE bucket = %s AND system_id = %s;
+        WHERE bucket = %s AND system_id = %s
+        UNION
+        SELECT attack_types AS labels
+        FROM phys_agg_{duration}s
+        WHERE bucket = %s AND system_id = %s
+        ;
         """
         async with pool.connection() as conn:
             async with conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute(query, (bucket, system_id))
+                await cur.execute(query, (bucket, system_id, bucket, system_id))
                 # There should be only one row per snapshot, returns text[] column
                 # return as string array
                 rows = await cur.fetchall()                
@@ -54,6 +59,7 @@ class AggregateRepository:
                     all_labels = []
                     for row in rows:
                         all_labels.extend(row['labels'])
+                    logging.info(f"Fetched labels for snapshot ID: {snapshot_id}, labels: {all_labels}")
                     # Normalize labels to "normal" and "anomaly"
                     # for i in range(len(all_labels)):
                     #     all_labels[i] = all_labels[i] if all_labels[i] == "normal" else "anomaly"

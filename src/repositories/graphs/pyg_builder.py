@@ -26,19 +26,21 @@ global_schema = {
     # Categorical feature mappings - used for categorical feature one-hot encoding
     'categorical_mappings': {
         'protocol': ["TCP", "UDP", "ICMP", "HTTP", "HTTPS", "OTHER"],
-        'asset_type': ["HMI", "PLC", "Pump", "Valv", "Flow Sensor", "Tank", "PressureSensor"],
+        'asset_type': ["HMI", "PLC", "Pump", "Valv", "Flow Sensor", "Tank", "PressureSensor","External"],
         'measurement_type': ["state", "pressure", "val"],
         'destination_port': ["well_known", "registered", "ephemeral", "other" ], # well-known: 0-1023, registered: 1024-49151, ephemeral: 49152-65535
         'source_port': ["well_known", "registered", "ephemeral", "other" ],
-        'source_ip': ["PLC_1_IP", "PLC_2_IP", "PLC_3_IP", "PLC_4_IP", "HMI_1_IP","Flow_sensor_1_IP","Flow_sensor_2_IP", "OTHER"],
-        'destination_ip': ["PLC_1_IP", "PLC_2_IP", "PLC_3_IP", "PLC_4_IP", "HMI_1_IP","Flow_sensor_1_IP","Flow_sensor_2_IP", "OTHER"],
-        'ip': ["PLC_1_IP", "PLC_2_IP", "PLC_3_IP", "PLC_4_IP", "HMI_1_IP","Flow_sensor_1_IP","Flow_sensor_2_IP", "OTHER"]
+        #'source_ip': ["PLC_1_IP", "PLC_2_IP", "PLC_3_IP", "PLC_4_IP", "HMI_1_IP","Flow_sensor_1_IP","Flow_sensor_2_IP", "OTHER"],
+        #'destination_ip': ["PLC_1_IP", "PLC_2_IP", "PLC_3_IP", "PLC_4_IP", "HMI_1_IP","Flow_sensor_1_IP","Flow_sensor_2_IP", "OTHER"],
+        #'ip': ["PLC_1_IP", "PLC_2_IP", "PLC_3_IP", "PLC_4_IP", "HMI_1_IP","Flow_sensor_1_IP","Flow_sensor_2_IP", "OTHER"]
         
     },
     "mac_width": 18
 }
 
-y_labels = ['normal', 'mitm', 'dos', 'scan', 'physical fault', 'anomaly']
+# Labels in order from least to most severe
+#, 'anomaly'
+y_labels = ['normal', 'anomaly', 'scan', 'dos', 'mitm', 'physical fault']
 y_bin_labels = ['normal', 'anomaly']
 
 
@@ -124,25 +126,23 @@ def index_to_ylabel(i, binary: bool = False) -> str:
         raise ValueError("Index out of range for y_labels")
 
 #handle IP address to numerical features
-# def ip_to_onehot_features(ip: str, buckets: int) -> list[float]:
-#     """Convert IP address string to one-hot encoded features based on hash buckets."""
-#     if ip is None or buckets <= 0 or ip == "0":
-#         return [0.0] * buckets
-#     ip = ip.split('/')[0] # remove CIDR if present
-#     parts = ip.split('.')
-#     if len(parts) != 4:
-#         return [0.0] * buckets
-#     try:
-#         nums = [int(part) for part in parts]
-#     except ValueError:
-#         return [0.0] * buckets
-#     if any(num < 0 or num > 255 for num in nums):
-#         return [0.0] * buckets
-#     ip_num = (nums[0] << 24) | (nums[1] << 16) | (nums[2] << 8) | nums[3]
-#     features = [0.0] * buckets
-#     index = ip_num % buckets
-#     features[index] = 1.0
-#     return features
+def ip_to_onehot_features(ip: str, buckets: int=4) -> list[float]:
+    """Convert IP address string to one-hot encoded features based on hash buckets."""
+    if ip is None or buckets <= 0 or ip == "0" or ip == "" or type(ip) is not str:
+        return [0.0] * buckets
+    ip = ip.split('/')[0] # remove CIDR if present
+    parts = ip.split('.')
+    features = [0.0] * buckets
+    if len(parts) != 4:
+        return features
+    for i in range(len(parts)):
+        try:
+            part_int = int(parts[i])
+            features[i] = part_int / 255.0
+        except ValueError:
+            features[i] = 0.0   
+    
+    return features
 
 def map_port_to_category(port: Optional[int]) -> Optional[str]:
     """Map port number to category string."""
@@ -161,13 +161,13 @@ def map_port_to_category(port: Optional[int]) -> Optional[str]:
 
 def mac_to_features(mac: str) -> list[float]:
     """Convert MAC address string to 6 numerical features normalized between 0 and 1."""
-    if mac is None or mac == "0":
+    if mac is None or mac == "0" or mac == "" or type(mac) is not str:
         return [0.0] * 6
     parts = mac.split(':')
     if len(parts) != 6:
         return [0.0] * 6
     try:
-        nums = [int(part, 16) for part in parts]
+        nums = [int(part, 16) for part in parts]        
     except ValueError:
         return [0.0] * 6
     if any(num < 0 or num > 255 for num in nums):
@@ -262,16 +262,16 @@ def fill_categorical_features(feature_tensor: torch.Tensor, tensor_row: int, lay
         # otherwise, use val directly
         if k in ['source_port', 'destination_port']:
             val = map_port_to_category(val)
-        elif k in ['source_ip', 'destination_ip']:
-            val = map_ip_to_category(val)
-        elif k == 'ip':
-            if val is not None:
-                val = map_ip_to_category(val)
-            else:
-                asset_type = properties.get('asset_type')
-                asset_name = properties.get('asset_name')
-                if asset_type in ['PLC', 'HMI', 'Flow Sensor'] and asset_name is not None:
-                    val = f"{asset_name}_IP"
+        #elif k in ['source_ip', 'destination_ip']:
+            #val = map_ip_to_category(val)
+        #elif k == 'ip':
+         #   if val is not None:
+          #      val = map_ip_to_category(val)
+          #  else:
+           #     asset_type = properties.get('asset_type')
+            #    asset_name = properties.get('asset_name')
+             #   if asset_type in ['PLC', 'HMI', 'Flow Sensor'] and asset_name is not None:
+              #      val = f"{asset_name}_IP"
         else:
             val = val if isinstance(val, str) and val in c else None        
 
@@ -280,20 +280,20 @@ def fill_categorical_features(feature_tensor: torch.Tensor, tensor_row: int, lay
             j = c.index(val)
             feature_tensor[tensor_row, offset + j] = 1.0
 
-def map_ip_to_category(ip: Optional[str]) -> str:
-    """Map IP address to predefined categories based on known IPs."""
-    if ip is None or ip == "0":
-        return "OTHER"
-    ip_map = {
-        "84.3.251.18": "PLC_1_IP",
-        "84.3.251.101": "PLC_2_IP",
-        "84.3.251.102": "PLC_3_IP",
-        "84.3.251.103": "PLC_4_IP",
-        "84.3.251.20": "HMI_1_IP",
-        "84.3.251.104": "Flow_sensor_1_IP",
-        "84.3.251.105": "Flow_sensor_2_IP"
-    }
-    return ip_map.get(ip, "OTHER")
+# def map_ip_to_category(ip: Optional[str]) -> str:
+#     """Map IP address to predefined categories based on known IPs."""
+#     if ip is None or ip == "0":
+#         return "OTHER"
+#     ip_map = {
+#         "84.3.251.18": "PLC_1_IP",
+#         "84.3.251.101": "PLC_2_IP",
+#         "84.3.251.102": "PLC_3_IP",
+#         "84.3.251.103": "PLC_4_IP",
+#         "84.3.251.20": "HMI_1_IP",
+#         "84.3.251.104": "Flow_sensor_1_IP",
+#         "84.3.251.105": "Flow_sensor_2_IP"
+#     }
+#     return ip_map.get(ip, "OTHER")
 
 def fill_ip_mac_features(feature_tensor: torch.Tensor, tensor_row: int, layout: FeatureLayout, properties: Dict[str, Any]):
     """Fill IP and MAC address features into the feature tensor."""
@@ -509,7 +509,7 @@ def to_pyg_hetero_data(snapshot: dict, write_name: bool = False) -> Data:
             node_feature_tensors[node_type] = torch.tensor(node_features[node_type], dtype=torch.float)
         else:
             # Handle case with no nodes of this type - create empty tensor with correct feature size
-            feature_size = len(get_hetero_column_names(node_type))
+            feature_size = len(get_hetero_column_names(node_type)) - 1  # -1 for degree feature to be added later
             node_feature_tensors[node_type] = torch.empty((0, feature_size), dtype=torch.float)
 
     logging.info("Node feature tensors created.")
@@ -558,6 +558,47 @@ def to_pyg_hetero_data(snapshot: dict, write_name: bool = False) -> Data:
     data['Measurements'].feature_names = get_hetero_column_names('Measurements')
     data['Endpoints'].feature_names = get_hetero_column_names('Endpoints')
 
+    # add node degree
+    # add node degree
+    logging.info("Adding node degree features to hetero data.")
+    for node_type in data.node_types:
+        num_nodes = data[node_type].num_nodes
+        
+        # Skip if no nodes of this type
+        if num_nodes == 0:
+            # We still need to add a "degree" column of size 0 to match feature_names
+            deg_column = torch.empty((0, 1), dtype=torch.float32)
+            data[node_type].x = torch.cat([data[node_type].x, deg_column], dim=1)
+            continue
+
+        # Collect all edge indices where this node_type is either source or destination
+        all_edge_indices_for_node_type = []
+        for edge_type in data.edge_types:
+            # If this node type is the source
+            if edge_type[0] == node_type:
+                all_edge_indices_for_node_type.append(data[edge_type].edge_index[0])
+            # If this node type is the destination
+            if edge_type[2] == node_type:
+                 all_edge_indices_for_node_type.append(data[edge_type].edge_index[1])
+
+        if not all_edge_indices_for_node_type:
+            # No edges connected to this node type
+            deg = torch.zeros(num_nodes, dtype=torch.float32)
+        else:
+            # Concatenate all indices into a single tensor
+            all_indices = torch.cat(all_edge_indices_for_node_type)
+            
+            # Calculate degree by counting occurrences of each node index
+            deg = degree(all_indices, num_nodes=num_nodes, dtype=torch.float32)
+        
+        # Apply log scale and reshape for concatenation
+        deg_column = torch.log1p(deg).unsqueeze(1)
+        
+        # populate degree feature in last column of x
+        data[node_type].x = torch.cat([data[node_type].x, deg_column], dim=1)
+
+    logging.info("Finished adding node degree features.")            
+
     # Copy snapshot-level properties
     logging.info("Copying snapshot-level properties to data object.")
     snap_id = snapshot.get('snapshot_id', 'unknown_snapshot')
@@ -566,6 +607,7 @@ def to_pyg_hetero_data(snapshot: dict, write_name: bool = False) -> Data:
 
     logging.info("Finished writing feature names and tensors to log files.")
     return data
+
 
 def write_hetero_feature_mappings(data, snapshot_id, write_name: bool = False):
     logging.info("Writing feature names and tensors to log files for debugging.")
@@ -624,23 +666,32 @@ def write_hetero_feature_mappings(data, snapshot_id, write_name: bool = False):
 def get_hetero_column_names(node_type: str) -> List[str]:
     """Get feature column names for a given heterogeneous node type."""
     if node_type == 'Assets':
-        return [f"asset_type_{cat}" for cat in global_schema['categorical_mappings']['asset_type']]
+        feature_names = [f"asset_type_{cat}" for cat in global_schema['categorical_mappings']['asset_type']]
+        feature_names.append("node_degree")
+        return feature_names
     elif node_type == 'Connections':
         feature_names = []
         feature_names.extend([f"protocol_{cat}" for cat in global_schema['categorical_mappings']['protocol']])
-        feature_names.extend([f"source_ip_{cat}" for cat in global_schema['categorical_mappings']['source_ip']])
-        feature_names.extend([f"destination_ip_{cat}" for cat in global_schema['categorical_mappings']['destination_ip']])
+        feature_names.extend([f"source_mac_byte_{i}" for i in range(6)])
+        feature_names.extend([f"source_ip_part_{i}" for i in range(4)])
+        feature_names.extend([f"destination_mac_byte_{i}" for i in range(6)])
+        feature_names.extend([f"destination_ip_part_{i}" for i in range(4)])
         feature_names.extend([f"source_port_{cat}" for cat in global_schema['categorical_mappings']['source_port']])
         feature_names.extend([f"destination_port_{cat}" for cat in global_schema['categorical_mappings']['destination_port']])
         feature_names.extend(['avg_size', 'num_connections'])
+        feature_names.append("node_degree") 
         return feature_names
     elif node_type == 'Measurements':
         feature_names = []
         feature_names.extend([f"measurement_type_{cat}" for cat in global_schema['categorical_mappings']['measurement_type']])
         feature_names.extend(['avg_value_state', 'avg_value_pressure', 'avg_value_val'])
+        feature_names.append("node_degree")
         return feature_names
     elif node_type == 'Endpoints':
-        return [f"ip_{cat}" for cat in global_schema['categorical_mappings']['ip']]
+        feature_names = [f"mac_byte_{i}" for i in range(6)]
+        feature_names.extend([f"ip_part_{i}" for i in range(4)])
+        feature_names.append("node_degree")
+        return feature_names
     else:
         return []
 
@@ -663,8 +714,6 @@ def map_hetero_connection_features(properties: Dict[str, Any]):
     #logger.info("Mapping connection features.")
      # build one-hot encoding based on predefined categories
     categories_protocol = global_schema['categorical_mappings']['protocol']
-    categories_source_ip = global_schema['categorical_mappings']['source_ip']
-    categories_destination_ip = global_schema['categorical_mappings']['destination_ip']
     categories_source_port = global_schema['categorical_mappings']['source_port']
     categories_destination_port = global_schema['categorical_mappings']['destination_port']
 
@@ -681,25 +730,21 @@ def map_hetero_connection_features(properties: Dict[str, Any]):
                 feature_vector[i] = 1.0
 
     #logger.info("Mapping source IP feature.")
+    source_mac = properties.get('source_mac')
+    source_mac_vector = mac_to_features(source_mac)
+    feature_vector.extend(source_mac_vector)
     # source ip one-hot encoding
-    source_ip_vector = [0.0] * len(categories_source_ip)
     source_ip = properties.get('source_ip')
-    source_ip_mapped = map_ip_to_category(source_ip)
-    if source_ip_mapped is not None:
-        for i, category in enumerate(categories_source_ip):
-            if source_ip_mapped == category:
-                source_ip_vector[i] = 1.0
+    source_ip_vector = ip_to_onehot_features(source_ip)
     feature_vector.extend(source_ip_vector)
 
     #logger.info("Mapping destination IP feature.")
+    destination_mac = properties.get('destination_mac')
+    destination_mac_vector = mac_to_features(destination_mac)
+    feature_vector.extend(destination_mac_vector)
     # destination ip one-hot encoding
-    destination_ip_vector = [0.0] * len(categories_destination_ip)
     destination_ip = properties.get('destination_ip')
-    destination_ip_mapped = map_ip_to_category(destination_ip)
-    if destination_ip_mapped is not None:
-        for i, category in enumerate(categories_destination_ip):
-            if destination_ip_mapped == category:
-                destination_ip_vector[i] = 1.0
+    destination_ip_vector = ip_to_onehot_features(destination_ip)
     feature_vector.extend(destination_ip_vector)
 
     #logger.info("Mapping source port feature.")
@@ -758,16 +803,14 @@ def map_hetero_measurement_features(properties: Dict[str, Any]):
 
 def map_hetero_endpoint_features(properties: Dict[str, Any]):
     """Map endpoint node properties to feature tensor."""
-    #logger.info("Mapping endpoint features.")
+    logger.info("Mapping endpoint features.")
     # build one-hot encoding based on predefined categories
-    categories = global_schema['categorical_mappings']['ip']
-    feature_vector = [0.0] * len(categories)
-    
+    #categories = global_schema['categorical_mappings']['ip']
+    #feature_vector = [0.0] * len(categories)
+    mac = properties.get('mac')
+    feature_vector = mac_to_features(mac)
     val = properties.get('ip')
-    ip_mapped = map_ip_to_category(val)
-    if ip_mapped is not None:
-        for i, category in enumerate(categories):
-            if ip_mapped == category:
-                feature_vector[i] = 1.0
+    feature_vector.extend(ip_to_onehot_features(val))
+
     return feature_vector
             

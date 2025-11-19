@@ -14,10 +14,24 @@ from schemas.XaiTypes import XaiTypes
 from repositories.graphs.pyg_builder import to_pyg_data, global_schema, to_pyg_hetero_data, ylabel_to_index, index_to_ylabel, y_labels, write_hetero_feature_mappings
 from repositories.persistence.anomaly import AnomalyRepository
 import torch
-import models.gnn
-import models.gnn_het
+import models.gnn_het_single as gnn_het_single
 import numpy as np
+import pandas as pd
 import models.gnn_het as gnn_het
+import models.gnn_het_bin as gnn_het_bin
+from torch_geometric.loader import DataLoader
+from torch_geometric.data import Batch
+from sklearn.metrics import (
+    accuracy_score,
+    balanced_accuracy_score,
+    classification_report,
+    f1_score,
+    precision_score,
+    recall_score,
+    confusion_matrix
+)
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 logging.info("Imported y_labels in anomaly_consumer.py: %s", y_labels)
 SEM = asyncio.Semaphore(2)  # limit to 2 concurrent processing
@@ -57,7 +71,7 @@ def _het_snapshots_to_dataset(snapshots):
             log.error(f"Error converting snapshot to PyG hetero data: {e}")
     return dataset
 
-def get_mapped_anomaly_labels(labels,is_binary: bool):
+def get_mapped_anomaly_labels(labels,is_binary: bool=False):
     """Map string labels to indices based on y_labels"""
     if is_binary:
             is_normal = all(label.lower() == 'normal' for label in labels)
@@ -65,11 +79,12 @@ def get_mapped_anomaly_labels(labels,is_binary: bool):
     else:
         mapped = []
         for label in labels:
+            logging.info(f"Mapping label: {label}")
             if label.lower() in y_labels:
                 mapped.append(ylabel_to_index(label.lower()))
             else:
                 mapped.append(ylabel_to_index('anomaly'))  # default to anomaly if unknown
-        return mapped
+        return mapped  # return highest severity label only
 
 async def handle_message(request):
     async with SEM:
@@ -77,9 +92,10 @@ async def handle_message(request):
 
 async def _process_request_gnn_het(request: DetectAnomalyRequest):
     """Train model based on src/models/gnn_het.py GNNHeteroAnomalyDetector class which uses GNNHeteroModel"""
-    use_anomaly = True
+    
     # get all snapshots
     snapshots = await SnapshotRepository.get_all_snapshots(request.duration, request.system_id)
+    #snapshots = await SnapshotRepository.get_all_snapshots_phys_only(request.duration, request.system_id)
 
     # Convert each snapshot to PyG data
     temp_data = _het_snapshots_to_dataset(snapshots)
@@ -94,51 +110,184 @@ async def _process_request_gnn_het(request: DetectAnomalyRequest):
         log.info(f"Getting labels for snapshot ID: {data.snapshot_id}")
         labels = await AggregateRepository.get_labels_for_snapshot(data.snapshot_id, request.system_id, request.duration)
         log.info(f"Snapshot ID: {data.snapshot_id} has labels: {labels}")
-        mapped_labels = get_mapped_anomaly_labels(labels, is_binary=not use_anomaly)
+        mapped_labels = get_mapped_anomaly_labels(labels)
         logging.info(f"Mapped labels for snapshot ID: {data.snapshot_id} are: {mapped_labels}")
-        need_copy = False
-        for label in mapped_labels:
-            if need_copy:
-                newdata = data.clone()
-            else:
-                newdata = data
-            newdata.y = torch.tensor([label], dtype=torch.float32)
-            y_counts[label] += 1
-            dataset.append(newdata)
-            need_copy = True
+        
+        data.y = torch.tensor([max(mapped_labels)], dtype=torch.float32)
+        y_counts[max(mapped_labels)] += 1
+        dataset.append(data)
+        #need_copy = mapped_labels and len(mapped_labels) > 1
+        # if need_copy:
+            
+        #     # for each mapped label except 0, create a new data copy if needed
+        #     for label in mapped_labels:
+        #         if label != 0:                
+        #             if need_copy:
+        #                 newdata = data.clone()
+        #             else:
+        #                 newdata = data
+        #             newdata.y = torch.tensor([label], dtype=torch.float32)
+        #             y_counts[label] += 1
+        #             dataset.append(newdata)
+        #             need_copy = True
+        # else:
+        #     # single label case, add directly
+        #     data.y = torch.tensor([mapped_labels[0]], dtype=torch.float32)
+        #     y_counts[mapped_labels[0]] += 1
+        #     dataset.append(data)
+        
     
     log.info(f"Prepared dataset with {len(dataset)} graphs")
     log.info(f"Label distribution: " + ", ".join([f"{index_to_ylabel(i)}: {count}" for i, count in enumerate(y_counts)]))
     config = {
-        "hidden_dim": 32,
-        "dropout": 0.4,
-        "learning_rate": 0.005,
-        "weight_decay": 0.0001,
-        "early_stopping_patience": 20,
-        "early_stopping_min_delta": 0.0001,
-        "max_epochs": 100,
+        "hidden_dim": 96,
+        "dropout": 0.3,
+        "learning_rate": 0.002,
+        "weight_decay": 1e-4,
+        "num_layers": 3,
+        "early_stopping_patience": 50,
+        "early_stopping_min_delta": 5e-4,
+        "max_epochs": 300,
         "num_heads": 4
     }
 
+    classify_config = {
+        "hidden_dim": 128,
+        "dropout": 0.15,
+        "learning_rate": 0.005,
+        "weight_decay": 5e-5,
+        "num_layers": 3,
+        "early_stopping_patience": 60,
+        "early_stopping_min_delta": 0.0001,
+        "max_epochs": 300,
+        "num_heads": 4
+    }
+
+    # m = gnn_het_single.GNNHeteroClassifierModel(config=config, metadata=dataset[0].metadata())
+    # # split dataset into train/val/test
+    # (train_loader, val_loader), final_test_loader = m.build_data_loaders(dataset)
+
+    # # train and validate detector model
+    # _, criterion, _ = m.fit_model(train_loader, val_loader, config)
+    # val_metrics = m.evaluate_model(val_loader)
+    # log.info(f"Validation Metrics: {val_metrics}")
+    # # perform final test on combined model
+    # y_all, y_pred_all = [], []
+    # y_all, y_pred_all = m.test_model(final_test_loader, test_description="Final Test Set - GNNHeteroAnomalyDetectionModel")
+    # m.get_label_metrics(y_all, y_pred_all, None, export_results=True, is_final_test=True)
+    # final_report_dict = classification_report(y_all, y_pred_all, target_names=y_labels, zero_division=0, output_dict=True)
+    # report_df = pd.DataFrame(final_report_dict).transpose()
+    # report_df.to_csv(f"./exports/results/classification_report_GNNHET_FINAL.csv")
+    # # save confusion matrix image
+    # cm = confusion_matrix(y_all, y_pred_all)
+    # plt.figure(figsize=(10, 7))
+    # sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
+    # plt.title("Confusion Matrix")
+    # plt.xlabel("Predicted")
+    # plt.ylabel("True")
+    # plt.savefig(f"./exports/images/gnn_het_detection_confusion_matrix_FINAL.png")
+    # plt.close()
+    # log.info("Final classification report saved.")
+
     # create model object
     #self, config: Dict[str, Any], in_channels: int=51, out_channels: int=6
-    
-    model = gnn_het.GNNHeteroClassifierModel(config=config, metadata=dataset[0].metadata())
-    
+
+    detector_model = gnn_het_bin.GNNHeteroAnomalyDetectionModel(config=config, metadata=dataset[0].metadata())
+    classify_model = gnn_het.GNNHeteroClassifierModel(config=classify_config,
+                                   metadata=dataset[0].metadata())
+
     # split dataset into train/val/test
-    train_loader, anom_train_loader, val_loader, anom_val_loader, test_loader = gnn_het.build_data_loaders(dataset)
+    bin_data, anom_data, final_test_data = detector_model.build_data_loaders(dataset)
     
 
-    # train model
-    model, criterion, metrics = gnn_het.fit_model(model, train_loader, anom_train_loader, val_loader, anom_val_loader, config, use_anomaly=use_anomaly)
+    # train and validate detector model
+    _, criterion, _ = detector_model.fit_model(bin_data[0], bin_data[1], config)
+    val_metrics = detector_model.evaluate_model(bin_data[1])
+    log.info(f"Binary Detector Validation Metrics: {val_metrics}")
 
-    # validate model
-    val_metrics = gnn_het.evaluate_model(model, val_loader, criterion, use_anomaly=use_anomaly)
-    log.info(f"Validation Metrics: {val_metrics}")
+    # train and validate classifier model
+    logging.info("Training Anomaly Classifier Model...")
+    _, anom_criterion, _ = classify_model.fit_model(anom_data[0], anom_data[1], config)
+    logging.info("Anomaly Classifier Model Training Completed.")
+    val_metrics = classify_model.evaluate_model(anom_data[1])
+    log.info(f"Anomaly Classifier Validation Metrics: {val_metrics}")
 
-    # test model
-    test_metrics = gnn_het.test_model(model, test_loader, criterion, test_description=f"{'multiclass' if use_anomaly else 'binary'}_{request.duration}s_GNNEtHeteroModel Test Set", use_anomaly=use_anomaly)
-    log.info(f"Test Metrics: {test_metrics}")
+    # perform final test on combined model
+    y_all, y_pred_all = [], []
+    y_all_bin, y_pred_all_bin = detector_model.test_model(final_test_data, test_description="Final Test Set - Binary Detector")
+
+    # filter final_test_data and create new DataLoader for only detected anomalies
+    anomaly_test_data = []
+    anomaly_test_idx = []
+    for i, label in enumerate(y_pred_all_bin):
+        if label == 1 and y_all_bin[i] > 0:  # only test samples predicted as anomaly and true label is anomaly
+            d = final_test_data.dataset[i].clone()
+            # subtract 1 from label to match classifier labels (0-4)
+            if d.y.item() > 0:
+                d.y = d.y - 1
+            anomaly_test_data.append(d)
+            # shift label to match classifier labels (0-4)
+            anomaly_test_idx.append(i)
+
+    y_all_anom, y_pred_all_anom = [], []
+    if anomaly_test_data:
+        anomaly_test_loader = DataLoader(anomaly_test_data, batch_size=32, shuffle=False)
+        # Run the classifier model on the anomaly test set
+        y_all_anom, y_pred_all_anom = classify_model.test_model(anomaly_test_loader, test_description="Final Test Set - Anomaly Classifier")
+    
+    y_all = [data.y.item() for data in final_test_data.dataset]
+    # combine binary and anomaly predictions
+    # for y_pred_all_bin, if 0 then final is 0, if 1 then final is from y_pred_all_anom
+    anom_idx = 0
+    for i, label in enumerate(y_pred_all_bin):
+        if label == 0 or (label == 1 and y_all_bin[i] == 0):
+            y_pred_all.append(label)
+        else:
+            y_pred_all.append(y_pred_all_anom[anom_idx] + 1)  # shift by 1 to match classifier labels
+            anom_idx += 1
+    logging.info(f"Combined final predictions: {y_pred_all}")
+    logging.info("Generating final classification report for combined model...")
+    classify_model.get_label_metrics(y_all, y_pred_all, None, export_results=True, is_final_test=True)
+    logging.info("Generated final classification report and saved to CSV.")
+    final_report_dict = classification_report(y_all, y_pred_all, target_names=y_labels, zero_division=0, output_dict=True)
+    report_df = pd.DataFrame(final_report_dict).transpose()
+    report_df.to_csv(f"./exports/results/classification_report_FINAL_COMBINED.csv")
+    # save confusion matrix image
+    logging.info("Generating confusion matrix for final combined model.")
+    cm = confusion_matrix(y_all, y_pred_all)
+    # add timestamp to filename to avoid overwriting
+    plt.figure(figsize=(10, 7))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
+    plt.title("Confusion Matrix")
+    plt.xlabel("Predicted")
+    plt.ylabel("True")
+    plt.savefig(f"./exports/images/gnn_het_detection_confusion_matrix_FINAL_COMBINED.png")
+    plt.close()
+    logging.info("Final combined confusion matrix saved.")
+
+    # #xai results
+    # logging.info("Generating XAI explanations for final test set...")
+    # xai_results = []
+    # # explain only the detected anomalies
+    # for i, data in enumerate(final_test_data.dataset):
+    #     is_anomaly = y_pred_all_bin[i] == 1
+    #     if is_anomaly:
+    #         log.info(f"Generating explanation for snapshot ID: {data.snapshot_id} (Index: {i})")
+    #         explanation = classify_model.explain_with_captum(data, target_class_idx=int(data.y.item()))
+    #         xai_results.append(explanation)
+
+    #         # now add explanations for each anomaly class predicted
+    #         for class_idx in range(1, 5):  # Assuming 4 anomaly classes
+    #             log.info(f"Generating explanation for snapshot ID: {data.snapshot_id} for class index: {class_idx} (Index: {i})")
+    #             explanation = classify_model.explain_with_captum(data, target_class_idx=class_idx)
+    #             xai_results.append(explanation)
+    # log.info(f"XAI explanations generated for {len(xai_results)} samples.")
+    # with open(f"./exports/results/gnn_het_xai_explanations_final_test.json", "w") as f:
+    #     json.dump(xai_results, f, indent=4)
+    
+
+
+
     # persist results to export folder for analysis as csv file
 
 

@@ -190,6 +190,132 @@ class SnapshotRepository:
             else:
                 return None
             
+    async def get_all_snapshots_scada_only(duration:int, system_id: str):
+        neo4j = await DataFactory.get_neo4j_instance()
+        async with neo4j.session() as session:            
+            snapshots = []
+            results = await session.run(
+                """
+                // Fetch all snapshots for the given system_id and duration
+                MATCH (s:Snapshot {system_id: $system_id, duration: $duration})
+                
+                CALL{      
+                    // For each snapshot, find all contained Connections and Measurements
+                    WITH s
+                    MATCH (s)-[:CONTAINS]->(item:Connection)
+
+                    // Find directly connected Endpoints and Assets
+                    OPTIONAL MATCH (item)-[r1]-(r1_node)
+                    WHERE r1_node:Endpoint OR r1_node:Asset
+
+                    // Find second-level connections to connect our graph more fully
+                    WITH s, item, r1, r1_node
+                    OPTIONAL MATCH (r1_node)-[r2]-(r2_node)
+                    WHERE r1_node:Asset AND (r2_node:Endpoint OR r2_node:Asset)
+
+                    // Collect all unique nodes and relationships
+                    WITH s,
+                    collect(DISTINCT item) + collect(DISTINCT r1_node) + collect(DISTINCT r2_node) as temp_all_nodes,
+                    collect(DISTINCT r1) + collect(DISTINCT r2) as temp_rels
+
+                    // Remove duplicates and NULLS
+                    WITH s,
+                    [n IN temp_all_nodes WHERE n IS NOT NULL] AS all_nodes,
+                    [r IN temp_rels WHERE r IS NOT NULL] AS rels
+
+                    RETURN {
+                        snapshot_id: s.snapshot_id,
+                        start_time: s.start_time,
+                        nodes: [node IN all_nodes | {
+                            id: id(node),
+                            labels: labels(node),
+                            properties: apoc.map.removeKeys(properties(node), ['snapshot_id', 'system_id'])
+                        }],
+                        relationships: [rel IN rels | {
+                            type: type(rel),
+                            source: id(startNode(rel)),
+                            target: id(endNode(rel)),
+                            properties: properties(rel)
+                        }]
+                    } AS snapshot
+                }
+                RETURN collect(snapshot) AS snapshots
+                """,
+                duration=duration,
+                system_id=system_id
+            )
+            record = await results.single()
+            if record:
+                snapshots = record["snapshots"]
+            logger.info(f"Fetched {len(snapshots)} snapshots.")
+            with open(f"./exports/data/Graphs/all_snapshots_{duration}s.json", "w") as f:
+                import json
+                json.dump(snapshots, f, default=str, indent=4)
+            return snapshots
+
+    async def get_all_snapshots_phys_only(duration:int, system_id: str):
+        neo4j = await DataFactory.get_neo4j_instance()
+        async with neo4j.session() as session:            
+            snapshots = []
+            results = await session.run(
+                """
+                // Fetch all snapshots for the given system_id and duration
+                MATCH (s:Snapshot {system_id: $system_id, duration: $duration})
+                
+                CALL{      
+                    // For each snapshot, find all contained Connections and Measurements
+                    WITH s
+                    MATCH (s)-[:CONTAINS]->(item:Measurement)
+
+                    // Find directly connected Endpoints and Assets
+                    OPTIONAL MATCH (item)-[r1]-(r1_node)
+                    WHERE r1_node:Endpoint OR r1_node:Asset
+
+                    // Find second-level connections to connect our graph more fully
+                    WITH s, item, r1, r1_node
+                    OPTIONAL MATCH (r1_node)-[r2]-(r2_node)
+                    WHERE r1_node:Asset AND (r2_node:Endpoint OR r2_node:Asset)
+
+                    // Collect all unique nodes and relationships
+                    WITH s,
+                    collect(DISTINCT item) + collect(DISTINCT r1_node) + collect(DISTINCT r2_node) as temp_all_nodes,
+                    collect(DISTINCT r1) + collect(DISTINCT r2) as temp_rels
+
+                    // Remove duplicates and NULLS
+                    WITH s,
+                    [n IN temp_all_nodes WHERE n IS NOT NULL] AS all_nodes,
+                    [r IN temp_rels WHERE r IS NOT NULL] AS rels
+
+                    RETURN {
+                        snapshot_id: s.snapshot_id,
+                        start_time: s.start_time,
+                        nodes: [node IN all_nodes | {
+                            id: id(node),
+                            labels: labels(node),
+                            properties: apoc.map.removeKeys(properties(node), ['snapshot_id', 'system_id'])
+                        }],
+                        relationships: [rel IN rels | {
+                            type: type(rel),
+                            source: id(startNode(rel)),
+                            target: id(endNode(rel)),
+                            properties: properties(rel)
+                        }]
+                    } AS snapshot
+                }
+                RETURN collect(snapshot) AS snapshots
+                """,
+                duration=duration,
+                system_id=system_id
+            )
+            record = await results.single()
+            if record:
+                snapshots = record["snapshots"]
+            logger.info(f"Fetched {len(snapshots)} snapshots.")
+            with open(f"./exports/data/Graphs/all_snapshots_phys_{duration}s.json", "w") as f:
+                import json
+                json.dump(snapshots, f, default=str, indent=4)
+            return snapshots
+
     async def get_all_snapshots(duration:int, system_id: str):
         neo4j = await DataFactory.get_neo4j_instance()
         async with neo4j.session() as session:            
