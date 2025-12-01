@@ -138,6 +138,7 @@ def init_db():
                                 AVG(r.measure_value) AS avg_value,
                                 MAX(r.measure_value) AS max_value,
                                 MIN(r.measure_value) AS min_value,
+                                stddev(r.measure_value) AS stddev_value,
                                 COUNT(*) AS num_measurements,
                             COALESCE(SUM(NULLIF(r.attributes->>'Label_n', '0')::INT), 0) AS num_attacks,
                             array_agg(DISTINCT r.attributes->>'Label') FILTER (WHERE r.attributes ? 'Label') AS attack_types
@@ -169,7 +170,23 @@ def init_db():
                             COALESCE(SUM(NULLIF(attributes->>'label_n', '0')::INT), 0) AS num_attacks,
                             array_agg(DISTINCT attributes->>'label') FILTER (WHERE attributes ? 'label') AS attack_types,
                                 COALESCE(host(source_ip), lower(source_mac::text)) AS source_key,
-                                COALESCE(host(destination_ip), lower(destination_mac::text)) AS destination_key
+                                COALESCE(host(destination_ip), lower(destination_mac::text)) AS destination_key,
+                                SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'10000000'::bit(8) = B'10000000'::bit(8) THEN 1 ELSE 0 END) AS tcp_cwr_count,
+                            SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'01000000'::bit(8) = B'01000000'::bit(8) THEN 1 ELSE 0 END) AS tcp_ece_count,
+                            SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'00100000'::bit(8) = B'00100000'::bit(8) THEN 1 ELSE 0 END) AS tcp_urg_count,
+                            SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'00010000'::bit(8) = B'00010000'::bit(8) THEN 1 ELSE 0 END) AS tcp_ack_count,
+                            SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'00001000'::bit(8) = B'00001000'::bit(8) THEN 1 ELSE 0 END) AS tcp_psh_count,
+                            SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'00000100'::bit(8) = B'00000100'::bit(8) THEN 1 ELSE 0 END) AS tcp_rst_count,
+                            SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'00000010'::bit(8) = B'00000010'::bit(8) THEN 1 ELSE 0 END) AS tcp_syn_count,
+                            SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'00000001'::bit(8) = B'00000001'::bit(8) THEN 1 ELSE 0 END) AS tcp_fin_count,
+                            -- syn ratio
+                            CASE WHEN COUNT(*) > 0 THEN
+                                SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'00000010'::bit(8) = B'00000010'::bit(8) THEN 1 ELSE 0 END)::FLOAT / COUNT(*) 
+                            ELSE 0 END AS tcp_syn_ratio,
+                            --ack ratio
+                            CASE WHEN COUNT(*) > 0 THEN
+                                SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'00010000'::bit(8) = B'00010000'::bit(8) THEN 1 ELSE 0 END)::FLOAT / COUNT(*) 
+                            ELSE 0 END AS tcp_ack_ratio
                             FROM scada_raw
                             GROUP BY bucket, system_id, source_ip, source_port, source_mac, destination_ip, destination_port, destination_mac, protocol
                             WITH NO DATA;
@@ -198,7 +215,17 @@ def init_db():
                             s.num_attacks,
                             s.attack_types,
                                 src.asset_id AS source_asset,
-                                dst.asset_id AS destination_asset
+                                dst.asset_id AS destination_asset,
+                                tcp_cwr_count,
+                                tcp_ece_count,
+                                tcp_urg_count,
+                                tcp_ack_count,
+                                tcp_psh_count,
+                                tcp_rst_count,
+                                tcp_syn_count,
+                                tcp_fin_count,
+                                tcp_syn_ratio,
+                                tcp_ack_ratio
                             FROM scada_agg_30s s
                             LEFT JOIN LATERAL (
                                 SELECT asset_id
@@ -230,6 +257,7 @@ def init_db():
                                 AVG(r.measure_value) AS avg_value,
                                 MAX(r.measure_value) AS max_value,
                                 MIN(r.measure_value) AS min_value,
+                                stddev(r.measure_value) AS stddev_value,
                                 COUNT(*) AS num_measurements,
                             COALESCE(SUM(NULLIF(r.attributes->>'Label_n', '0')::INT), 0) AS num_attacks,
                             array_agg(DISTINCT r.attributes->>'Label') FILTER (WHERE r.attributes ? 'Label') AS attack_types
@@ -261,7 +289,23 @@ def init_db():
                             COALESCE(SUM(NULLIF(attributes->>'label_n', '0')::INT), 0) AS num_attacks,
                             array_agg(DISTINCT attributes->>'label') FILTER (WHERE attributes ? 'label') AS attack_types,
                                 COALESCE(host(source_ip), lower(source_mac::text)) AS source_key,
-                                COALESCE(host(destination_ip), lower(destination_mac::text)) AS destination_key
+                                COALESCE(host(destination_ip), lower(destination_mac::text)) AS destination_key,
+                                SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'10000000'::bit(8) = B'10000000'::bit(8) THEN 1 ELSE 0 END) AS tcp_cwr_count,
+                            SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'01000000'::bit(8) = B'01000000'::bit(8) THEN 1 ELSE 0 END) AS tcp_ece_count,
+                            SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'00100000'::bit(8) = B'00100000'::bit(8) THEN 1 ELSE 0 END) AS tcp_urg_count,
+                            SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'00010000'::bit(8) = B'00010000'::bit(8) THEN 1 ELSE 0 END) AS tcp_ack_count,
+                            SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'00001000'::bit(8) = B'00001000'::bit(8) THEN 1 ELSE 0 END) AS tcp_psh_count,
+                            SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'00000100'::bit(8) = B'00000100'::bit(8) THEN 1 ELSE 0 END) AS tcp_rst_count,
+                            SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'00000010'::bit(8) = B'00000010'::bit(8) THEN 1 ELSE 0 END) AS tcp_syn_count,
+                            SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'00000001'::bit(8) = B'00000001'::bit(8) THEN 1 ELSE 0 END) AS tcp_fin_count,
+                            -- syn ratio
+                            CASE WHEN COUNT(*) > 0 THEN
+                                SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'00000010'::bit(8) = B'00000010'::bit(8) THEN 1 ELSE 0 END)::FLOAT / COUNT(*) 
+                            ELSE 0 END AS tcp_syn_ratio,
+                            --ack ratio
+                            CASE WHEN COUNT(*) > 0 THEN
+                                SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'00010000'::bit(8) = B'00010000'::bit(8) THEN 1 ELSE 0 END)::FLOAT / COUNT(*) 
+                            ELSE 0 END AS tcp_ack_ratio
                             FROM scada_raw
                             GROUP BY bucket, system_id, source_ip, source_port, source_mac, destination_ip, destination_port, destination_mac, protocol
                             WITH NO DATA;
@@ -290,7 +334,17 @@ def init_db():
                             s.num_attacks,
                             s.attack_types,
                                 src.asset_id AS source_asset,
-                                dst.asset_id AS destination_asset
+                                dst.asset_id AS destination_asset,
+                                tcp_cwr_count,
+                                tcp_ece_count,
+                                tcp_urg_count,
+                                tcp_ack_count,
+                                tcp_psh_count,
+                                tcp_rst_count,
+                                tcp_syn_count,
+                                tcp_fin_count,
+                                tcp_syn_ratio,
+                                tcp_ack_ratio
                             FROM scada_agg_16s s
                             LEFT JOIN LATERAL (
                                 SELECT asset_id
@@ -323,6 +377,7 @@ def init_db():
                                 AVG(r.measure_value) AS avg_value,
                                 MAX(r.measure_value) AS max_value,
                                 MIN(r.measure_value) AS min_value,
+                                stddev(r.measure_value) AS stddev_value,
                                 COUNT(*) AS num_measurements,                            
                             COALESCE(SUM(NULLIF(r.attributes->>'Label_n', '0')::INT), 0) AS num_attacks,
                             array_agg(DISTINCT r.attributes->>'Label') FILTER (WHERE r.attributes ? 'Label') AS attack_types
@@ -354,7 +409,23 @@ def init_db():
                             COALESCE(SUM(NULLIF(attributes->>'label_n', '0')::INT), 0) AS num_attacks,
                             array_agg(DISTINCT attributes->>'label') FILTER (WHERE attributes ? 'label') AS attack_types,
                                 COALESCE(host(source_ip), lower(source_mac::text)) AS source_key,
-                                COALESCE(host(destination_ip), lower(destination_mac::text)) AS destination_key
+                                COALESCE(host(destination_ip), lower(destination_mac::text)) AS destination_key,
+                                SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'10000000'::bit(8) = B'10000000'::bit(8) THEN 1 ELSE 0 END) AS tcp_cwr_count,
+                            SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'01000000'::bit(8) = B'01000000'::bit(8) THEN 1 ELSE 0 END) AS tcp_ece_count,
+                            SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'00100000'::bit(8) = B'00100000'::bit(8) THEN 1 ELSE 0 END) AS tcp_urg_count,
+                            SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'00010000'::bit(8) = B'00010000'::bit(8) THEN 1 ELSE 0 END) AS tcp_ack_count,
+                            SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'00001000'::bit(8) = B'00001000'::bit(8) THEN 1 ELSE 0 END) AS tcp_psh_count,
+                            SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'00000100'::bit(8) = B'00000100'::bit(8) THEN 1 ELSE 0 END) AS tcp_rst_count,
+                            SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'00000010'::bit(8) = B'00000010'::bit(8) THEN 1 ELSE 0 END) AS tcp_syn_count,
+                            SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'00000001'::bit(8) = B'00000001'::bit(8) THEN 1 ELSE 0 END) AS tcp_fin_count,
+                            -- syn ratio
+                            CASE WHEN COUNT(*) > 0 THEN
+                                SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'00000010'::bit(8) = B'00000010'::bit(8) THEN 1 ELSE 0 END)::FLOAT / COUNT(*) 
+                            ELSE 0 END AS tcp_syn_ratio,
+                            --ack ratio
+                            CASE WHEN COUNT(*) > 0 THEN
+                                SUM(CASE WHEN CAST(attributes->>'flags' AS bit(8)) & B'00010000'::bit(8) = B'00010000'::bit(8) THEN 1 ELSE 0 END)::FLOAT / COUNT(*) 
+                            ELSE 0 END AS tcp_ack_ratio
                             FROM scada_raw
                             GROUP BY bucket, system_id, source_ip, source_port, source_mac, destination_ip, destination_port, destination_mac, protocol
                             WITH NO DATA;
@@ -383,7 +454,17 @@ def init_db():
                                 s.num_attacks,
                                 s.attack_types,
                                 src.asset_id AS source_asset,
-                                dst.asset_id AS destination_asset
+                                dst.asset_id AS destination_asset,
+                                tcp_cwr_count,
+                                tcp_ece_count,
+                                tcp_urg_count,
+                                tcp_ack_count,
+                                tcp_psh_count,
+                                tcp_rst_count,
+                                tcp_syn_count,
+                                tcp_fin_count,
+                                tcp_syn_ratio,
+                                tcp_ack_ratio
                             FROM scada_agg_10s s
                             LEFT JOIN LATERAL (
                                 SELECT asset_id

@@ -236,6 +236,7 @@ services:
           done;
           /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic Data.Raw.Physical --bootstrap-server $$KAFKA_BOOTSTRAP_SERVERS --partitions 16 --replication-factor 1 &&
           /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic Data.Raw.Scada --bootstrap-server $$KAFKA_BOOTSTRAP_SERVERS --partitions 16 --replication-factor 1 &&
+          /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic Data.Analysis --bootstrap-server $$KAFKA_BOOTSTRAP_SERVERS --partitions 1 --replication-factor 1 &&
           /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic Data.Error --bootstrap-server $$KAFKA_BOOTSTRAP_SERVERS --partitions 1 --replication-factor 1 &&
           /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic Anomaly.Predict --bootstrap-server $$KAFKA_BOOTSTRAP_SERVERS --partitions 16 --replication-factor 1 &&
           /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic Data.Graphs --bootstrap-server $$KAFKA_BOOTSTRAP_SERVERS --partitions 16 --replication-factor 1 &&

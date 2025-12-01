@@ -332,6 +332,7 @@ class GNNHeteroAnomalyDetectionModel(nn.Module):
         logging.info("Data split counts exported.")
         return (train_loader, val_loader), (anom_train_loader, anom_val_loader), final_test_loader
 
+
     def get_criterion(self, data_loader: DataLoader) -> nn.Module:
         """Get loss function with class weights to handle class imbalance."""
         

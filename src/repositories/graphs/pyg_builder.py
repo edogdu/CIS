@@ -1,3 +1,4 @@
+import csv
 from torch_geometric.data import Data
 from dataclasses import dataclass
 from torch_geometric.utils import to_undirected, remove_self_loops, coalesce, degree
@@ -5,6 +6,13 @@ import torch
 from typing import Tuple, Dict, Any, List, Optional
 import logging
 import math
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+from torch_geometric.data import HeteroData
+from torch_geometric.utils import to_undirected, remove_self_loops, coalesce
+from torch_geometric.transforms import ToUndirected
+import pandas as pd
 #from torch_geometric.transforms import LocalClusteringCoefficient
 
 logger = logging.getLogger("data_builder")
@@ -14,22 +22,29 @@ global_schema = {
     'property_keys': [
         # Network properties
         "avg_size", #, "destination_port", "destination_total_packets",
-         "num_connections"  #, "source_port", "source_total_packets",
+         "num_connections",  #, "source_port", "source_total_packets",
+         "tcp_cwr_count", "tcp_ece_count", "tcp_urg_count", "tcp_ack_count",
+         "tcp_psh_count", "tcp_rst_count", "tcp_syn_count", "tcp_fin_count",
+         "tcp_ack_ratio",
+         "modbus_response_count", "modbus_response_ratio", "avg_modbus_response_code"
     ],
     'physical_property_keys': [
         "state",
         "pressure",
-        "value"
+        "value",
+        #"min_value",
+        #"max_value",
+        "stddev_value"
     ],
     # Node Labels - used for node type one-hot encoding
     'label_space': ["Endpoint", "Asset", "Connection", "Measurement"],
     # Categorical feature mappings - used for categorical feature one-hot encoding
     'categorical_mappings': {
-        'protocol': ["TCP", "UDP", "ICMP", "HTTP", "HTTPS", "OTHER"],
+        'protocol': ["TCP", "ICMP", "IP", "Modbus", "ARP", "OTHER"],
         'asset_type': ["HMI", "PLC", "Pump", "Valv", "Flow Sensor", "Tank", "PressureSensor","External"],
         'measurement_type': ["state", "pressure", "val"],
-        'destination_port': ["well_known", "registered", "ephemeral", "other" ], # well-known: 0-1023, registered: 1024-49151, ephemeral: 49152-65535
-        'source_port': ["well_known", "registered", "ephemeral", "other" ],
+        #'destination_port': ["well_known", "registered", "ephemeral", "other" ], # well-known: 0-1023, registered: 1024-49151, ephemeral: 49152-65535
+        #'source_port': ["well_known", "registered", "ephemeral", "other" ],
         #'source_ip': ["PLC_1_IP", "PLC_2_IP", "PLC_3_IP", "PLC_4_IP", "HMI_1_IP","Flow_sensor_1_IP","Flow_sensor_2_IP", "OTHER"],
         #'destination_ip': ["PLC_1_IP", "PLC_2_IP", "PLC_3_IP", "PLC_4_IP", "HMI_1_IP","Flow_sensor_1_IP","Flow_sensor_2_IP", "OTHER"],
         #'ip': ["PLC_1_IP", "PLC_2_IP", "PLC_3_IP", "PLC_4_IP", "HMI_1_IP","Flow_sensor_1_IP","Flow_sensor_2_IP", "OTHER"]
@@ -37,13 +52,13 @@ global_schema = {
     },
     "mac_width": 18
 }
-
-# Labels in order from least to most severe
-#, 'anomaly'
-y_labels = ['normal', 'anomaly', 'scan', 'dos', 'mitm', 'physical fault']
+# Label spaces
+#y_labels = ['normal', 'anomaly', 'scan', 'dos', 'mitm', 'physical fault']
+y_labels = ['normal', 'scan', 'dos', 'mitm', 'physical fault']
 y_bin_labels = ['normal', 'anomaly']
 
-
+# physical asset types
+physical_asset_types = ['Pump', 'Valve', 'Tank', 'FlowSensor']
 
 @dataclass
 class FeatureLayout:
@@ -182,204 +197,13 @@ def to_float(val) -> float:
         return 1.0 if val else 0.0
     elif isinstance(val, str):
         try:
-            return float(val)
+            v = float(val)
+            return 0.0 if math.isnan(v) or math.isinf(v) else v
         except ValueError:
             return 0.0
     else:
         return 0.0
     
-def build_layout(schema: Dict[str, Any]=None) -> FeatureLayout:
-    """Build FeatureLayout from schema dictionary."""
-    if schema is None:
-        schema = global_schema
-    return FeatureLayout(
-        property_keys = list(schema['property_keys']),
-        physical_property_keys = list(schema['physical_property_keys']),
-        label_space = list(schema['label_space']),
-        categorical_mappings = dict(schema['categorical_mappings']),
-        include_masks = schema.get('include_masks', True),
-        include_degree = schema.get('include_degree', True)
-    )
-
-def fill_physical_measurement_features(feature_tensor: torch.Tensor, tensor_row: int, layout: FeatureLayout, properties: Dict[str, Any]):
-    """Fill physical measurement features into the feature tensor."""
-    measurement_type = properties.get('measurement_type')
-    phys_measurement = properties.get('avg_value')
-    #logging.info(f"Filling physical measurement features for measurement_type: {measurement_type}, value: {phys_measurement}")
-    for i, phys_key in enumerate(layout.physical_property_keys):
-        #logging.info(f"Processing physical property key: {phys_key}")
-        if phys_key == 'state':
-            if measurement_type == 'state':
-                feature_tensor[tensor_row, layout.physical_offset + i] = to_float(phys_measurement)
-            else:
-                feature_tensor[tensor_row, layout.physical_offset + i] = 0.0
-        elif phys_key == 'pressure':
-            if measurement_type == 'pressure':
-                feature_tensor[tensor_row, layout.physical_offset + i] = to_float(phys_measurement) / 1843.0
-            else:
-                feature_tensor[tensor_row, layout.physical_offset + i] = 0.0
-        elif phys_key == 'value':
-            if measurement_type == 'val':
-                feature_tensor[tensor_row, layout.physical_offset + i] = to_float(phys_measurement) / 4683.0
-            else:
-                feature_tensor[tensor_row, layout.physical_offset + i] = 0.0
-        else:
-            feature_tensor[tensor_row, layout.physical_offset + i] = 0.0
-    
-
-def fill_numeric_and_mask_features(feature_tensor: torch.Tensor, tensor_row: int, layout: FeatureLayout, properties: Dict[str, Any]):
-    """Fill numeric and mask features into the feature tensor."""
-    for i, key in enumerate(layout.property_keys):
-        if key in properties and properties[key] is not None:            
-            if key == 'avg_size':                
-                feature_tensor[tensor_row, layout.numeric_offset + i] = (to_float(properties[key]) - 60.0) / (78.0 - 60.0)
-            else:
-                feature_tensor[tensor_row, layout.numeric_offset + i] = math.log1p(to_float(properties[key]))
-            if layout.include_masks:
-                feature_tensor[tensor_row, layout.masks_offset + i] = 1.0
-        else:
-            feature_tensor[tensor_row, layout.numeric_offset + i] = 0.0
-            if layout.include_masks:
-                feature_tensor[tensor_row, layout.masks_offset + i] = 0.0
-
-def fill_label_features(feature_tensor: torch.Tensor, tensor_row: int, layout: FeatureLayout, labels: List[str]):
-    """Fill label features into the feature tensor."""
-    # one-hot encode node labels
-    idx = {label: i for i, label in enumerate(layout.label_space)}
-    for label in labels or []:
-        # if label is in layout, set corresponding position to 1
-        j = idx.get(label)
-        if j is not None:
-            feature_tensor[tensor_row, layout.labels_offset + j] = 1.0        
-
-def fill_categorical_features(feature_tensor: torch.Tensor, tensor_row: int, layout: FeatureLayout, properties: Dict[str, Any]):
-    """Fill categorical features into the feature tensor."""
-    for k, c in layout.categorical_mappings.items():
-        offset, width = layout.categorical_offsets[k]
-        val = properties.get(k)        
-        # if k in ['source_port', 'destination_port'], map port number to category
-        # if k in ['source_ip', 'destination_ip'], map IP to category based on predefined list
-        # otherwise, use val directly
-        if k in ['source_port', 'destination_port']:
-            val = map_port_to_category(val)
-        #elif k in ['source_ip', 'destination_ip']:
-            #val = map_ip_to_category(val)
-        #elif k == 'ip':
-         #   if val is not None:
-          #      val = map_ip_to_category(val)
-          #  else:
-           #     asset_type = properties.get('asset_type')
-            #    asset_name = properties.get('asset_name')
-             #   if asset_type in ['PLC', 'HMI', 'Flow Sensor'] and asset_name is not None:
-              #      val = f"{asset_name}_IP"
-        else:
-            val = val if isinstance(val, str) and val in c else None        
-
-        #val =  val if isinstance(val, str) and val in c else map_port_to_category(val) if k in ['source_port', 'destination_port'] else ("OTHER" if "OTHER" in c else None)
-        if val is not None:
-            j = c.index(val)
-            feature_tensor[tensor_row, offset + j] = 1.0
-
-# def map_ip_to_category(ip: Optional[str]) -> str:
-#     """Map IP address to predefined categories based on known IPs."""
-#     if ip is None or ip == "0":
-#         return "OTHER"
-#     ip_map = {
-#         "84.3.251.18": "PLC_1_IP",
-#         "84.3.251.101": "PLC_2_IP",
-#         "84.3.251.102": "PLC_3_IP",
-#         "84.3.251.103": "PLC_4_IP",
-#         "84.3.251.20": "HMI_1_IP",
-#         "84.3.251.104": "Flow_sensor_1_IP",
-#         "84.3.251.105": "Flow_sensor_2_IP"
-#     }
-#     return ip_map.get(ip, "OTHER")
-
-def fill_ip_mac_features(feature_tensor: torch.Tensor, tensor_row: int, layout: FeatureLayout, properties: Dict[str, Any]):
-    """Fill IP and MAC address features into the feature tensor."""
-    # IP features
-    #ip_buckets = layout.ip_hash_buckets if (layout.use_ip_features and layout.ip_hash_buckets > 0) else 0
-    current_offset = layout.ipmac_offset
-    src_mac = properties.get('source_mac')
-    dst_mac = properties.get('destination_mac')
-    mac = properties.get('mac')
-    src_mac_feats = mac_to_features(src_mac)
-    dst_mac_feats = mac_to_features(dst_mac)    
-    mac_feats = mac_to_features(mac)
-    feature_tensor[tensor_row, current_offset : current_offset + 6] = torch.tensor(src_mac_feats, dtype=torch.float32)
-    feature_tensor[tensor_row, current_offset + 6 : current_offset + 12] = torch.tensor(dst_mac_feats, dtype=torch.float32)
-    feature_tensor[tensor_row, current_offset + 12 : current_offset + 18] = torch.tensor(mac_feats, dtype=torch.float32)
-    current_offset += 18
-
-def build_edge_index(num_nodes: int, edges: List[Dict[str, Any]], graphid_to_tensorid: Dict[int, int]) -> torch.Tensor:
-    """Build edge index tensor from edges and graphid to tensorid mapping."""
-    if not edges:
-        return torch.empty((2, 0), dtype=torch.long)
-    source, target = [], []
-    for edge in edges:
-        src = edge.get('source')
-        dst = edge.get('target')
-        src_id = graphid_to_tensorid.get(src)
-        dst_id = graphid_to_tensorid.get(dst)
-        if src_id is None or dst_id is None:
-            continue
-        source.append(src_id)
-        target.append(dst_id)
-    edge_index = torch.tensor([source, target], dtype=torch.long)    
-    edge_index, _ = remove_self_loops(edge_index)
-    edge_index = to_undirected(edge_index, num_nodes=num_nodes)
-    edge_index, _ = coalesce(edge_index, None, num_nodes=num_nodes, reduce='add')
-    return edge_index
-
-def add_degree_column(feature_tensor: torch.Tensor, edge_index: torch.Tensor):
-    """Add node degree as an additional feature column.  Node degree is computed from the edge_index.  It is used to help the model learn structural properties of the graph."""
-    deg = degree(edge_index[0], num_nodes=feature_tensor.size(0), dtype=torch.float32).unsqueeze(1)
-    deg = torch.log1p(deg)  # log scale
-    return torch.cat([feature_tensor, deg], dim=1)
-
-def map_to_features(
-        nodes: List[Dict[str, Any]],
-        edges: List[Dict[str, Any]],
-        layout: FeatureLayout
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Map nodes and edges to feature tensor and edge index."""
-    
-    unique_nodes = {node['id']: node for node in nodes}
-    unique_nodes = list(unique_nodes.values())
-
-    # print(f"Nodes: {len(unique_nodes)}, Edges: {len(edges)}")
-    # print(f"Node example: {unique_nodes[0] if unique_nodes else 'No nodes'}")
-    # print(f"Edge example: {edges[0] if edges else 'No edges'}")
-    #id mappings
-    graphid_to_tensorid = {node['id']: i for i, node in enumerate(unique_nodes)}
-    tensorid_to_graphid = {i: node['id'] for i, node in enumerate(unique_nodes)}
-       
-    N = len(graphid_to_tensorid)
-    print("Number of nodes:", N)
-    #node features
-    x = torch.zeros((N, layout.total_width), dtype=torch.float32)
-    for node in unique_nodes:
-        # print(f"Processing node: {node['id']}")
-        # print(f"Node properties: {node.get('properties', {})}")
-        # print(f"Node labels: {node.get('labels', [])}")
-        i = graphid_to_tensorid[node['id']]
-        props = node.get('properties', {})
-        labels = node.get('labels', [])
-        fill_numeric_and_mask_features(x, i, layout, props)
-        fill_physical_measurement_features(x, i, layout, props)
-        fill_label_features(x, i, layout, labels)
-        fill_categorical_features(x, i, layout, props)
-        fill_ip_mac_features(x, i, layout, props)
-        #print("Node processed.")
-
-    #edges
-    edge_index = build_edge_index(N, edges, graphid_to_tensorid)
-    if layout.include_degree:
-        x = add_degree_column(x, edge_index)
-        
-
-    return x, edge_index
-
 def build_feature_names(layout: FeatureLayout) -> List[str]:
     """Build list of feature names based on the layout."""
     feature_names = []
@@ -407,56 +231,189 @@ def build_feature_names(layout: FeatureLayout) -> List[str]:
         feature_names.append("node_degree")
     return feature_names
 
-
-def to_pyg_data(snapshot: dict, schema: Dict[str, Any] = None, write_name: bool = False) -> Data:
-    """Convert a snapshot dictionary to a PyG Data object."""
-    # Convert the snapshot data into PyG Data format
-    nodes = snapshot.get('nodes', [])
-    edges = snapshot.get('relationships', [])
-
-    logger.info(f"Converting snapshot {snapshot.get('snapshot_id')} with {len(nodes)} nodes and {len(edges)} edges to PyG Data.")
-    layout = build_layout(schema)
-    x, edge_index = map_to_features(nodes, edges, layout)
-
-    logger.info(f"Built features with shape: {x.shape}, edge_index shape: {edge_index.shape}")
-
-    data = Data(x=x, edge_index=edge_index)
-    data.feature_names = build_feature_names(layout)
-
-    #data.pos_edge_label_index = edge_index
-    #data.num_node_features = x.size(1)
-    #data.num_nodes = x.size(0)
-    #data.graphid_to_tensorid = {node['id']: i for i, node in enumerate(nodes)}
-    #data.tensorid_to_graphid = {i: node['id'] for i, node in enumerate(nodes)}
+def calculate_endpoint_stats(nodes, snapshot_id=None) -> None:
+    """Calculate the following features foreach endpoint node, using connection nodes:
+        - endpoint_num_unique_ports: number of unique ports connected to the endpoint
+        - endpoint_port_entropy: entropy of the port distribution
+        - endpoint_unique_peer_count: number of unique peers connected to the endpoint
+        - endpoint_in_out_ratio: ratio of incoming to outgoing connections
+        - endpoint_num_unique_protocols: number of unique protocols used by the endpoint
+        - endpoint_protocol_entropy: entropy of the protocol distribution
+    """
+    endpoint_metadata = {}
+    connection_props = {}
     
-    # write feature names once only and tensor to log files for debugging
-    if write_name:
-        #overwrite existing file with new feature names
-        with open(f"./logs/feature_names.txt", "w") as f:
-            for name in data.feature_names:
-                f.write(f"{name}\n")
-    with open(f"./logs/feature_tensor_{snapshot.get('snapshot_id')}.txt", "w") as f:
-        for i in range(data.x.size(0)):
-            f.write(f"Node {i} features: {data.x[i].tolist()}\n")
+    for node in nodes:
+        node_id = node['id']
+        labels = node.get('labels', [])
+        props = node.get('properties', {})
 
-    # Copy snapshot-level properties
-    snap_id = snapshot.get('snapshot_id', 'unknown_snapshot')
-    logging.info(f"Assigning snapshot_id: {snap_id} to data object.")
-    data.snapshot_id = snap_id
-    # for key in ('snapshot_id', 'system_id', 'start_time', 'end_time', 'duration'):
-    #     val = snapshot.get(key)
-    #     if val is not None:
-    #         data[key] = val
+        if 'Endpoint' in labels:
+            endpoint_metadata[node_id] = {
+                'ip': props.get('ip'),
+                'mac': props.get('mac'),
+            }
+        elif 'Connection' in labels:
+            connection_props[node_id] = props
+            
+    
+    # Lookup helpers
+    ip_to_endpoint = {}
+    mac_to_endpoint = {}
+    for endpoint_id, meta in endpoint_metadata.items():
+        ip = meta.get('ip')
+        mac = meta.get('mac')
+        if ip:
+            ip_to_endpoint.setdefault(ip, set()).add(endpoint_id)
+        if mac:
+            mac_to_endpoint.setdefault(mac, set()).add(endpoint_id)
+
+    endpoint_stats: Dict[str, Dict[str, Any]] = {}
+    for conn_id, props in connection_props.items():
+        src_ip = props.get('source_ip')
+        dst_ip = props.get('destination_ip')
+        src_mac = props.get('source_mac')
+        dst_mac = props.get('destination_mac')
+        protocol = props.get('protocol')
+        #logging.info(f"Processing connection {conn_id}: src_ip={src_ip}, dst_ip={dst_ip}, src_mac={src_mac}, dst_mac={dst_mac}, protocol={protocol}")
+        if src_ip is not None:
+            src_ip = str(src_ip).split('/')[0]
+        if dst_ip is not None:
+            dst_ip = str(dst_ip).split('/')[0]
+
+        src_endpoints = ip_to_endpoint.get(src_ip, set()).union(mac_to_endpoint.get(src_mac, set()))
+        dst_endpoints = ip_to_endpoint.get(dst_ip, set()).union(mac_to_endpoint.get(dst_mac, set()))
+
+        for endpoint_id in src_endpoints:
+            stats = endpoint_stats.setdefault(endpoint_id, {
+                'ports': {},
+                'peers': set(),
+                'incoming': 0,
+                'outgoing': 0,
+                'protocols': {}
+            })
+            port = props.get('destination_port')
+            if port is not None:
+                stats['ports'][port] = stats['ports'].get(port, 0) + 1
+            peer = dst_ip or dst_mac
+            if peer:
+                stats['peers'].add(peer)
+            stats['outgoing'] += 1
+            if protocol:
+                stats['protocols'][protocol] = stats['protocols'].get(protocol, 0) + 1
+
+        for endpoint_id in dst_endpoints:
+            stats = endpoint_stats.setdefault(endpoint_id, {
+                'ports': {},
+                'peers': set(),
+                'incoming': 0,
+                'outgoing': 0,
+                'protocols': {}
+            })
+            port = props.get('source_port')
+            if port is not None:
+                stats['ports'][port] = stats['ports'].get(port, 0) + 1
+            peer = src_ip or src_mac
+            if peer:
+                stats['peers'].add(peer)
+            stats['incoming'] += 1
+            if protocol:
+                stats['protocols'][protocol] = stats['protocols'].get(protocol, 0) + 1
+        
+    # Compute final stats
+    final_stats = {}
+    for endpoint_id, stats in endpoint_stats.items():
+        ports = stats['ports']
+        total_ports = sum(ports.values())
+        port_entropy = -sum((count / total_ports) * math.log2(count / total_ports) for count in ports.values()) if total_ports > 0 else 0.0
+
+        protocols = stats['protocols']
+        total_protocols = sum(protocols.values())
+        protocol_entropy = -sum((count / total_protocols) * math.log2(count / total_protocols) for count in protocols.values()) if total_protocols > 0 else 0.0
+
+        incoming = stats['incoming']
+        outgoing = stats['outgoing']
+        in_out_ratio = incoming / (outgoing + 1e-6)  # avoid division by zero        
         
 
-    return data
+            #         stat_features[0] = stats.get('endpoint_ports_count_bucket_1', 0.0)
+            # stat_features[1] = stats.get('endpoint_ports_count_bucket_2_10', 0.0)
+            # stat_features[2] = stats.get('endpoint_ports_count_bucket_11_100', 0.0)
+            # stat_features[3] = stats.get('endpoint_ports_count_bucket_high', 0.0)
+        logging.info(f'port count: {len(ports)}')
+        # append port count to csv file for data analysis
+        with open(f'./logs/port_counts.csv', 'a', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow([snapshot_id, endpoint_id, len(ports)])
+        final_stats[endpoint_id] = {
+            'endpoint_ports_count_bucket_1': 1.0 if len(ports) == 1 else 0.0,
+            'endpoint_ports_count_bucket_2_10': 1.0 if 2 <= len(ports) <= 50 else 0.0,
+            'endpoint_ports_count_bucket_11_100': 1.0 if 51 <= len(ports) <= 100 else 0.0,
+            'endpoint_ports_count_bucket_high': 1.0 if len(ports) > 100 else 0.0,
+            'endpoint_port_entropy': port_entropy,
+            'endpoint_unique_peer_count': len(stats['peers']),
+            'endpoint_in_out_ratio': in_out_ratio,
+            'endpoint_num_unique_protocols': len(protocols),
+            'endpoint_protocol_entropy': protocol_entropy
+        }
+        # export final_stats as csv for data analysis
+        
+        # with open(f'./logs/final_stats_{snapshot_id}.csv', 'w', newline='') as csvfile:
+        #     fieldnames = ['endpoint_id'] + list(next(iter(final_stats.values())).keys())
+        #     writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        #     writer.writeheader()
+        #     for endpoint_id, stats in final_stats.items():
+        #         row = {'endpoint_id': endpoint_id}
+        #         row.update(stats)
+        #         writer.writerow(row)
+        
+    return final_stats
+
+def merge_physical_asset_info(nodes, snapshot_id):
+    """Merge physical asset information from asset and measurement nodes."""
+    physical_assets = {}
+    for node in nodes:
+        labels = node.get('labels', [])
+        props = node.get('properties', {})
+        node_id = node['id']
+        
+        #if any of physical_asset_types match on labels, process as physical asset
+        if any(patype in labels for patype in physical_asset_types):
+            
+            
+            asset_type = props.get('asset_type', '').lower()            
+            asset_id = props.get('asset_id')
+            #must have asset_id property
+            if not asset_id:
+                continue
+
+            # look for asset_id property in pysical_assets
+            if asset_id not in physical_assets:
+                physical_assets[asset_id] = {   
+                    'measurements': {}
+                }
+            physical_assets[asset_id]['asset_type'] = asset_type
+            
+        elif 'Measurement' in labels:
+            asset_id = props.get('asset_id')
+            #must have asset_id property
+            if not asset_id:
+                continue
+            if asset_id not in physical_assets:
+                physical_assets[asset_id] = {
+                    'asset_type': 'unknown',
+                    'measurements': {}
+                }
+            avg_value = to_float(props.get('avg_value'))                
+            physical_assets[asset_id]['measurements']['avg_value'] = avg_value            
+            physical_assets[asset_id]['measurements']['stddev_value'] = to_float(props.get('stddev_value'))            
+            
+    return physical_assets
 
 # Heterogeneous GNN model data functions
 def to_pyg_hetero_data(snapshot: dict, write_name: bool = False) -> Data:
     """Convert a snapshot dictionary to a PyG Hetero Data object."""
-    from torch_geometric.data import HeteroData
-    from torch_geometric.utils import to_undirected, remove_self_loops, coalesce
-    from torch_geometric.transforms import ToUndirected
+    
 
     nodes = snapshot.get('nodes', [])
     edges = snapshot.get('relationships', [])    
@@ -465,18 +422,27 @@ def to_pyg_hetero_data(snapshot: dict, write_name: bool = False) -> Data:
     node_id_to_index_map = {}
 
     node_features = {
-        'Assets': [],
+        #'Assets': [],
         'Connections': [],
-        'Measurements': [],
+        'Pumps': [],
+        'FlowSensors': [],
+        'Tanks': [],
+        'Valves': [],
         'Endpoints': []
     }
 
     node_ids = {
-        'Assets': [],
+        #'Assets': [],
         'Connections': [],
-        'Measurements': [],
+        'Pumps': [],
+        'FlowSensors': [],
+        'Tanks': [],
+        'Valves': [],
         'Endpoints': []
     }
+    snap_id = snapshot.get('snapshot_id', 'unknown_snapshot')
+    endpoint_stats = calculate_endpoint_stats(nodes, snapshot_id=snap_id)
+    physical_assets = merge_physical_asset_info(nodes, snapshot_id=snap_id)
 
     #build node features for each node type
     for i, node in enumerate(nodes):
@@ -484,46 +450,105 @@ def to_pyg_hetero_data(snapshot: dict, write_name: bool = False) -> Data:
         labels = node.get('labels', [])
         properties = node.get('properties', {})
 
-        if 'Asset' in labels:
-            features = map_hetero_asset_features(properties)
-            node_features['Assets'].append(features)
-            node_ids['Assets'].append(node_id)
+        if any(patype in labels for patype in physical_asset_types):
+            l = set(labels).intersection(physical_asset_types)
+            node_type = f'{l.pop()}s'
+            
+            
+            asset_id = properties.get('asset_id')
+            asset_info = physical_assets.get(asset_id, {})
+            if not asset_info:
+                logging.warning(f'No physical asset info found for asset_id: {asset_id} in node_id: {node_id}')
+                continue
+            features = [0.0] * 2 
+            features[0] = asset_info.get('measurements', {}).get('avg_value', 0.0)
+            features[1] = asset_info.get('measurements', {}).get('stddev_value', 0.0) 
+            node_features[node_type].append(features)
+            node_ids[node_type].append(node_id)        
+            
+        # elif 'Asset' in labels:
+        #     features = map_hetero_asset_features(properties)
+        #     if any(patype in labels for patype in physical_asset_types):
+                
+        #         asset_info = physical_assets.get(node_id, {})
+        #         measurements = asset_info.get('measurements', {})
+                # append physical measurement features
+                
+            # else:
+            #     node_features['Assets'].append(features)
+            #     node_ids['Assets'].append(node_id)
         elif 'Connection' in labels:
             features = map_hetero_connection_features(properties)
             node_features['Connections'].append(features)
             node_ids['Connections'].append(node_id)
-        elif 'Measurement' in labels:
-            features = map_hetero_measurement_features(properties)
-            node_features['Measurements'].append(features)
-            node_ids['Measurements'].append(node_id)
+        # elif 'Measurement' in labels:
+        #     asset_id = properties.get('asset_id', '').lower()
+        #     if 'pump' in asset_id:
+        #         features = map_hetero_measurement_features(properties)
+        #         node_features['PumpMeasurements'].append(features)
+        #         node_ids['PumpMeasurements'].append(node_id)            
+        #     elif 'sensor' in asset_id:
+        #         features = map_hetero_measurement_features(properties)
+        #         node_features['SensorMeasurements'].append(features)
+        #         node_ids['SensorMeasurements'].append(node_id)
+        #     elif 'tank' in asset_id:
+        #         features = map_hetero_measurement_features(properties)
+        #         node_features['TankMeasurements'].append(features)
+        #         node_ids['TankMeasurements'].append(node_id)
+        #     elif 'valv' in asset_id:
+        #         features = map_hetero_measurement_features(properties)
+        #         node_features['ValveMeasurements'].append(features)
+        #         node_ids['ValveMeasurements'].append(node_id)
         elif 'Endpoint' in labels:
             features = map_hetero_endpoint_features(properties)
+            stat_features = [0.0] * 6
+            stats = endpoint_stats.get(node_id, {})
+            # stat_features[0] = stats.get('endpoint_ports_count_bucket_1', 0.0)
+            # stat_features[1] = stats.get('endpoint_ports_count_bucket_2_10', 0.0)
+            # stat_features[2] = stats.get('endpoint_ports_count_bucket_11_100', 0.0)
+            # stat_features[3] = stats.get('endpoint_ports_count_bucket_high', 0.0)
+            
+            # stat_features[4] = float(stats.get('endpoint_port_entropy', 0.0))
+            # stat_features[5] = float(stats.get('endpoint_unique_peer_count', 0))
+            # stat_features[6] = float(stats.get('endpoint_in_out_ratio', 0.0))
+            # stat_features[7] = float(stats.get('endpoint_num_unique_protocols', 0))
+            # stat_features[8] = float(stats.get('endpoint_protocol_entropy', 0.0))
+            stat_features[0] = stats.get('endpoint_num_unique_ports', 0.0)
+            
+            
+            stat_features[1] = float(stats.get('endpoint_port_entropy', 0.0))
+            stat_features[2] = float(stats.get('endpoint_unique_peer_count', 0))
+            stat_features[3] = float(stats.get('endpoint_in_out_ratio', 0.0))
+            stat_features[4] = float(stats.get('endpoint_num_unique_protocols', 0))
+            stat_features[5] = float(stats.get('endpoint_protocol_entropy', 0.0))                        
+            features.extend(stat_features)
             node_features['Endpoints'].append(features)
             node_ids['Endpoints'].append(node_id)
 
     # Convert lists to tensors
-    logging.info("Converting node feature lists to tensors.")
+    #logging.info("Converting node feature lists to tensors.")
     node_feature_tensors = {}
     for node_type in node_features:
         if node_features[node_type]:
             node_feature_tensors[node_type] = torch.tensor(node_features[node_type], dtype=torch.float)
         else:
             # Handle case with no nodes of this type - create empty tensor with correct feature size
-            feature_size = len(get_hetero_column_names(node_type)) - 1  # -1 for degree feature to be added later
+            feature_size = len(get_hetero_column_names(node_type)) # -1 for degree feature to be added later
             node_feature_tensors[node_type] = torch.empty((0, feature_size), dtype=torch.float)
 
-    logging.info("Node feature tensors created.")
+    #logging.info("Node feature tensors created.")
     #populate node features for each type and build ID mappings
     for node_type, id_list in node_ids.items():        
         data[node_type].x = node_feature_tensors[node_type]
         data[node_type].num_nodes = len(id_list)
+        data[node_type].original_id = id_list
 
         for i, node_id in enumerate(id_list):
             node_id_to_index_map[node_id] = (node_type, i)
 
     # build edge indices for each node type
     edge_indices = {}
-    logging.info("Building edge indices for each edge type.")
+    #logging.info("Building edge indices for each edge type.")
     for edge in edges:
         src_id = edge.get('source')
         dst_id = edge.get('target')
@@ -543,24 +568,28 @@ def to_pyg_hetero_data(snapshot: dict, write_name: bool = False) -> Data:
         edge_indices[edge_key][1].append(dst_idx)
 
     # Convert edge indices to tensors
-    logging.info("Converting edge index lists to tensors.")
+    #logging.info("Converting edge index lists to tensors.")
     for edge_key, (src_list, dst_list) in edge_indices.items():
         data[edge_key].edge_index = torch.tensor([src_list, dst_list], dtype=torch.long)
 
-    logging.info("Applying transformations to data.")
+    #logging.info("Applying transformations to data.")
     # handle undirected edges
     data = ToUndirected()(data)
         
-    logging.info("Adding feature names.")
+    #logging.info("Adding feature names.")
     #Add feature names  
-    data['Assets'].feature_names = get_hetero_column_names('Assets')
+    #data['Assets'].feature_names = get_hetero_column_names('Assets')
+    #FlowSensor = Asset{asset_type:'Flow_sensor'}
     data['Connections'].feature_names = get_hetero_column_names('Connections')
-    data['Measurements'].feature_names = get_hetero_column_names('Measurements')
+    data['Pumps'].feature_names = get_hetero_column_names('Pumps')        
+    data['Valves'].feature_names = get_hetero_column_names('Valves')
+    data['Tanks'].feature_names = get_hetero_column_names('Tanks')
+    data['FlowSensors'].feature_names = get_hetero_column_names('FlowSensors')
     data['Endpoints'].feature_names = get_hetero_column_names('Endpoints')
 
     # add node degree
     # add node degree
-    logging.info("Adding node degree features to hetero data.")
+    #logging.info("Adding node degree features to hetero data.")
     for node_type in data.node_types:
         num_nodes = data[node_type].num_nodes
         
@@ -581,56 +610,103 @@ def to_pyg_hetero_data(snapshot: dict, write_name: bool = False) -> Data:
             if edge_type[2] == node_type:
                  all_edge_indices_for_node_type.append(data[edge_type].edge_index[1])
 
-        if not all_edge_indices_for_node_type:
-            # No edges connected to this node type
-            deg = torch.zeros(num_nodes, dtype=torch.float32)
-        else:
-            # Concatenate all indices into a single tensor
-            all_indices = torch.cat(all_edge_indices_for_node_type)
+        # if not all_edge_indices_for_node_type:
+        #     # No edges connected to this node type
+        #     deg = torch.zeros(num_nodes, dtype=torch.float32)
+        # else:
+        #     # Concatenate all indices into a single tensor
+        #     all_indices = torch.cat(all_edge_indices_for_node_type)
             
-            # Calculate degree by counting occurrences of each node index
-            deg = degree(all_indices, num_nodes=num_nodes, dtype=torch.float32)
+        #     # Calculate degree by counting occurrences of each node index
+        #     deg = degree(all_indices, num_nodes=num_nodes, dtype=torch.float32)
         
-        # Apply log scale and reshape for concatenation
-        deg_column = torch.log1p(deg).unsqueeze(1)
+        # # Apply log scale and reshape for concatenation
+        # deg_column = torch.log1p(deg).unsqueeze(1)
         
-        # populate degree feature in last column of x
-        data[node_type].x = torch.cat([data[node_type].x, deg_column], dim=1)
+        # # populate degree feature in last column of x
+        # data[node_type].x = torch.cat([data[node_type].x, deg_column], dim=1)
 
-    logging.info("Finished adding node degree features.")            
+    #logging.info("Finished adding node degree features.")            
 
     # Copy snapshot-level properties
-    logging.info("Copying snapshot-level properties to data object.")
-    snap_id = snapshot.get('snapshot_id', 'unknown_snapshot')
-    logging.info(f"Assigning snapshot_id: {snap_id} to data object.")
+    #logging.info("Copying snapshot-level properties to data object.")
+    
+    #logging.info(f"Assigning snapshot_id: {snap_id} to data object.")
     data.snapshot_id = snap_id
 
-    logging.info("Finished writing feature names and tensors to log files.")
+    #logging.info("Finished writing feature names and tensors to log files.")
+    #visualize_features_distribution(data)
     return data
 
+def calculate_entropy_from_counts(counts: dict) -> float:
+    """Calculate entropy given a dictionary of counts."""
+    if not counts:
+        return 0.0
+    total = float(sum(counts.values()))
+    if total <= 0:
+        return 0.0
+    entropy = 0.0
+    for count in counts.values():
+        if count > 0:
+            p = count / total
+            entropy -= p * np.log2(p + 1e-12)  # add small value to avoid log(0)
+    return entropy
+
+def visualize_features_distribution(data: list[HeteroData]):
+    """Visualize the distribution of features for each node type in the 
+    entire heterogeneous dataset."""
+    os.makedirs("./exports/data/feature_distributions", exist_ok=True)
+    #combine node information from all graphs
+    combined_data = []
+    # create holders with key (node_type,feature_name)
+    for graph in data:
+        for node_type in graph.node_types:
+            feature_names = graph[node_type].feature_names
+            x = graph[node_type].x.numpy()
+            for i, feature_name in enumerate(feature_names):
+                combined_data.append({
+                    'node_type': node_type,
+                    'feature_name': feature_name,
+                    'values': x[:, i]
+                })
+    df = pd.DataFrame(combined_data)
+    # plot distribution for each node type and feature
+    for (node_type, feature_name), group in df.groupby(['node_type', 'feature_name']):
+        plt.figure(figsize=(10, 6))
+        plt.hist(group['values'].explode(), bins=50, alpha=0.7)
+        plt.title(f'Distribution of {feature_name} for node type {node_type}')
+        plt.xlabel('Feature Value')
+        plt.ylabel('Frequency')
+        plt.grid(True)
+        plt.savefig(f'./exports/data/feature_distributions/{node_type}_{feature_name}_distribution.png')
+        plt.close()
 
 def write_hetero_feature_mappings(data, snapshot_id, write_name: bool = False):
     logging.info("Writing feature names and tensors to log files for debugging.")
     
     # Feature names
     if write_name:
-        with open(f"./logs/hetero_feature_names_asset.txt", "w") as f:
-            for name in data['Assets'].feature_names:
-                f.write(f"{name}\n")
+        # with open(f"./logs/hetero_feature_names_asset.txt", "w") as f:
+        #     for name in get_hetero_column_names('Assets'):
+        #         f.write(f"{name}\n")
                 
         with open(f"./logs/hetero_feature_names_connection.txt", "w") as f:
-            for name in data['Connections'].feature_names:
+            for name in get_hetero_column_names('Connections'):
                 f.write(f"{name}\n")
-        with open(f"./logs/hetero_feature_names_measurement.txt", "w") as f:
-            for name in data['Measurements'].feature_names:
-                f.write(f"{name}\n")
+        # with open(f"./logs/hetero_feature_names_measurement.txt", "w") as f:
+        #     for name in get_hetero_column_names('Measurements'):
+        #         f.write(f"{name}\n")
         with open(f"./logs/hetero_feature_names_endpoint.txt", "w") as f:
-            for name in data['Endpoints'].feature_names:
+            for name in get_hetero_column_names('Endpoints'):
                 f.write(f"{name}\n")
     #Assets
-    with open(f"./logs/hetero_feature_tensor_asset_{snapshot_id}.txt", "w") as f:        
-        for i in range(data['Assets'].x.size(0)):
-            f.write(f"{data['Assets'].x[i].tolist()}\n")
+    for asset_type in physical_asset_types:
+        with open(f"./logs/hetero_feature_names_{asset_type.lower()}_{snapshot_id}.txt", "w") as f:
+            for name in get_hetero_column_names(f'{asset_type}s'):
+                f.write(f"{name}\n")
+    # with open(f"./logs/hetero_feature_tensor_asset_{snapshot_id}.txt", "w") as f:        
+    #     for i in range(data['Assets'].x.size(0)):
+    #         f.write(f"{data['Assets'].x[i].tolist()}\n")
     
     #Connections
     with open(f"./logs/hetero_feature_tensor_connection_{snapshot_id}.txt", "w") as f:
@@ -638,9 +714,23 @@ def write_hetero_feature_mappings(data, snapshot_id, write_name: bool = False):
             f.write(f"{data['Connections'].x[i].tolist()}\n")
     
     #Measurements
-    with open(f"./logs/hetero_feature_tensor_measurement_{snapshot_id}.txt", "w") as f:
-        for i in range(data['Measurements'].x.size(0)):
-            f.write(f"{data['Measurements'].x[i].tolist()}\n")
+    # with open(f"./logs/hetero_feature_tensor_pumpmeasurement_{snapshot_id}.txt", "w") as f:
+    #     for i in range(data['PumpMeasurements'].x.size(0)):
+    #         f.write(f"{data['PumpMeasurements'].x[i].tolist()}\n")
+    
+    # with open(f"./logs/hetero_feature_tensor_sensormeasurement_{snapshot_id}.txt", "w") as f:
+    #     for i in range(data['SensorMeasurements'].x.size(0)):
+    #         f.write(f"{data['SensorMeasurements'].x[i].tolist()}\n")
+
+    # with open(f"./logs/hetero_feature_tensor_tankmeasurement_{snapshot_id}.txt", "w") as f:
+    #     for i in range(data['TankMeasurements'].x.size(0)):
+    #         f.write(f"{data['TankMeasurements'].x[i].tolist()}\n")
+
+    # with open(f"./logs/hetero_feature_tensor_valvemeasurement_{snapshot_id}.txt", "w") as f:
+    #     for i in range(data['ValveMeasurements'].x.size(0)):
+    #         f.write(f"{data['ValveMeasurements'].x[i].tolist()}\n")
+
+    
 
     #Endpoints
     with open(f"./logs/hetero_endpoint_feature_tensor_{snapshot_id}.txt", "w") as f:
@@ -665,34 +755,61 @@ def write_hetero_feature_mappings(data, snapshot_id, write_name: bool = False):
 
 def get_hetero_column_names(node_type: str) -> List[str]:
     """Get feature column names for a given heterogeneous node type."""
-    if node_type == 'Assets':
-        feature_names = [f"asset_type_{cat}" for cat in global_schema['categorical_mappings']['asset_type']]
-        feature_names.append("node_degree")
+    if node_type in ('Tanks', 'FlowSensors', 'Pumps', 'Valves'):        
+        feature_names = ['avg_value', 'stddev_value']
+        #feature_names.append("node_degree")
         return feature_names
     elif node_type == 'Connections':
         feature_names = []
         feature_names.extend([f"protocol_{cat}" for cat in global_schema['categorical_mappings']['protocol']])
         feature_names.extend([f"source_mac_byte_{i}" for i in range(6)])
-        feature_names.extend([f"source_ip_part_{i}" for i in range(4)])
+        #feature_names.extend([f"source_ip_part_{i}" for i in range(4)])
         feature_names.extend([f"destination_mac_byte_{i}" for i in range(6)])
-        feature_names.extend([f"destination_ip_part_{i}" for i in range(4)])
-        feature_names.extend([f"source_port_{cat}" for cat in global_schema['categorical_mappings']['source_port']])
-        feature_names.extend([f"destination_port_{cat}" for cat in global_schema['categorical_mappings']['destination_port']])
+        #feature_names.extend([f"destination_ip_part_{i}" for i in range(4)])
+        #feature_names.extend(['source_port', 'destination_port'])
+        #feature_names.extend([f"source_port_{cat}" for cat in global_schema['categorical_mappings']['source_port']])
+        #feature_names.extend([f"destination_port_{cat}" for cat in global_schema['categorical_mappings']['destination_port']])
         feature_names.extend(['avg_size', 'num_connections'])
-        feature_names.append("node_degree") 
+        feature_names.extend(['tcp_cwr_count', 'tcp_ece_count', 'tcp_urg_count', 'tcp_ack_count', 'tcp_psh_count', 'tcp_rst_count', 'tcp_syn_count', 'tcp_fin_count'])
+        feature_names.extend(['tcp_syn_ratio', 'tcp_ack_ratio', 'tcp_rst_ratio'])
+        feature_names.extend(['modbus_response_count', 'modbus_response_ratio', 'avg_modbus_response_code', 'modbus_response_present'])
+        #feature_names.append("node_degree") 
         return feature_names
-    elif node_type == 'Measurements':
-        feature_names = []
-        feature_names.extend([f"measurement_type_{cat}" for cat in global_schema['categorical_mappings']['measurement_type']])
-        feature_names.extend(['avg_value_state', 'avg_value_pressure', 'avg_value_val'])
-        feature_names.append("node_degree")
+    # elif node_type == 'Measurements':
+    #     feature_names = ['avg_value', 'stddev_value'] #, 'min_value', 'max_value'
+    #     #feature_names.extend([f"measurement_type_{cat}" for cat in global_schema['categorical_mappings']['measurement_type']])
+    #     #feature_names.extend(['avg_value_state', 'avg_value_pressure', 'avg_value_val'])
+    #     #feature_names.extend(['stddev_value'])
+    #     #feature_names.append("node_degree")
+    #     return feature_names
+    # elif node_type == 'StateMeasurements':
+    #     feature_names = ['avg_value', 'stddev_value']
+    #     #feature_names.append("node_degree")
         return feature_names
     elif node_type == 'Endpoints':
         feature_names = [f"mac_byte_{i}" for i in range(6)]
         feature_names.extend([f"ip_part_{i}" for i in range(4)])
-        feature_names.append("node_degree")
+        # feature_names.extend([
+        #                          'endpoint_ports_count_bucket_1',
+        #                          'endpoint_ports_count_bucket_2_10',
+        #                          'endpoint_ports_count_bucket_11_100',
+        #                          'endpoint_ports_count_bucket_high',
+        #                       'endpoint_port_entropy',
+        #                        'endpoint_unique_peer_count',
+        #                        'endpoint_in_out_ratio',
+        #                        'endpoint_num_unique_protocols',
+        #                        'endpoint_protocol_entropy'])
+        feature_names.extend([
+                                'endpoint_num_unique_ports',
+                                'endpoint_port_entropy',
+                               'endpoint_unique_peer_count',
+                               'endpoint_in_out_ratio',
+                               'endpoint_num_unique_protocols',
+                               'endpoint_protocol_entropy'])
+        #feature_names.append("node_degree")
         return feature_names
     else:
+        logging.warning(f"Unknown node type for feature names: {node_type}")
         return []
 
 def map_hetero_asset_features(properties: Dict[str, Any]):
@@ -714,12 +831,29 @@ def map_hetero_connection_features(properties: Dict[str, Any]):
     #logger.info("Mapping connection features.")
      # build one-hot encoding based on predefined categories
     categories_protocol = global_schema['categorical_mappings']['protocol']
-    categories_source_port = global_schema['categorical_mappings']['source_port']
-    categories_destination_port = global_schema['categorical_mappings']['destination_port']
-
+    #categories_source_port = global_schema['categorical_mappings']['source_port']
+    #categories_destination_port = global_schema['categorical_mappings']['destination_port']
+    source_port = properties.get('source_port')
+    destination_port = properties.get('destination_port')
     avg_size = properties.get('avg_size')
     num_connections = properties.get('num_connections')
-    
+    tcp_cwr_count = properties.get('tcp_cwr_count')
+    tcp_ece_count = properties.get('tcp_ece_count')
+    tcp_urg_count = properties.get('tcp_urg_count')
+    tcp_ack_count = properties.get('tcp_ack_count')
+    tcp_psh_count = properties.get('tcp_psh_count')
+    tcp_rst_count = properties.get('tcp_rst_count')
+    tcp_syn_count = properties.get('tcp_syn_count')
+    tcp_fin_count = properties.get('tcp_fin_count')
+    tcp_syn_ratio = properties.get('tcp_syn_ratio')
+    tcp_ack_ratio = properties.get('tcp_ack_ratio')
+    # calculate tcp_rst_ratio, since it's missing in the properties
+    tcp_rst_ratio = (tcp_rst_count / num_connections) if tcp_rst_count is not None and num_connections is not None and num_connections != 0 else 0.0
+    modbus_response_count = properties.get('modbus_response_count')
+    modbus_response_ratio = properties.get('modbus_response_ratio')
+    avg_modbus_response_code = properties.get('avg_modbus_response_code')
+    modbus_response_present = properties.get('modbus_response_present')
+
     #logger.info("Mapping protocol feature.")
     #protocol one-hot encoding
     feature_vector = [0.0] * len(categories_protocol)
@@ -734,76 +868,102 @@ def map_hetero_connection_features(properties: Dict[str, Any]):
     source_mac_vector = mac_to_features(source_mac)
     feature_vector.extend(source_mac_vector)
     # source ip one-hot encoding
-    source_ip = properties.get('source_ip')
-    source_ip_vector = ip_to_onehot_features(source_ip)
-    feature_vector.extend(source_ip_vector)
+    # source_ip = properties.get('source_ip')
+    # source_ip_vector = ip_to_onehot_features(source_ip)
+    # feature_vector.extend(source_ip_vector)
 
     #logger.info("Mapping destination IP feature.")
     destination_mac = properties.get('destination_mac')
     destination_mac_vector = mac_to_features(destination_mac)
     feature_vector.extend(destination_mac_vector)
     # destination ip one-hot encoding
-    destination_ip = properties.get('destination_ip')
-    destination_ip_vector = ip_to_onehot_features(destination_ip)
-    feature_vector.extend(destination_ip_vector)
+    # destination_ip = properties.get('destination_ip')
+    # destination_ip_vector = ip_to_onehot_features(destination_ip)
+    # feature_vector.extend(destination_ip_vector)
 
     #logger.info("Mapping source port feature.")
     # source port one-hot encoding
-    source_port_vector = [0.0] * len(categories_source_port)
-    source_port = properties.get('source_port')
-    source_port_mapped = map_port_to_category(source_port)
-    if source_port_mapped is not None:
-        for i, category in enumerate(categories_source_port):
-            if source_port_mapped == category:
-                source_port_vector[i] = 1.0
-    feature_vector.extend(source_port_vector)
+    # source_port_vector = [0.0] * len(categories_source_port)
+    # source_port = properties.get('source_port')
+    # source_port_mapped = map_port_to_category(source_port)
+    # if source_port_mapped is not None:
+    #     for i, category in enumerate(categories_source_port):
+    #         if source_port_mapped == category:
+    #             source_port_vector[i] = 1.0
+    # feature_vector.extend(source_port_vector)
+
+
 
     #logger.info("Mapping destination port feature.")
     # destination port one-hot encoding
-    destination_port_vector = [0.0] * len(categories_destination_port)
-    destination_port = properties.get('destination_port')
-    destination_port_mapped = map_port_to_category(destination_port)
-    if destination_port_mapped is not None:
-        for i, category in enumerate(categories_destination_port):
-            if destination_port_mapped == category:
-                destination_port_vector[i] = 1.0
-    feature_vector.extend(destination_port_vector)
+    # destination_port_vector = [0.0] * len(categories_destination_port)
+    # destination_port = properties.get('destination_port')
+    # destination_port_mapped = map_port_to_category(destination_port)
+    # if destination_port_mapped is not None:
+    #     for i, category in enumerate(categories_destination_port):
+    #         if destination_port_mapped == category:
+    #             destination_port_vector[i] = 1.0
+    # feature_vector.extend(destination_port_vector)   
+
+    # feature_vector.extend([
+    #     np.log1p(to_float(source_port)) if source_port is not None else 0.0,
+    #     np.log1p(to_float(destination_port)) if destination_port is not None else 0.0
+    # ])
 
     #logger.info("Mapping numeric features.")
     # numeric features
     feature_vector.extend([
-        (to_float(avg_size) - 60.0) / (78.0 - 60.0) if avg_size is not None else 0.0,
-        math.log1p(to_float(num_connections)) if num_connections is not None else 0.0
+        to_float(avg_size) if avg_size is not None else 0.0,
+        to_float(num_connections) if num_connections is not None else 0.0
     ])
+    # add tcp flag counts and ratios
+    feature_vector.extend([to_float(tcp_cwr_count) if tcp_cwr_count is not None else 0.0])
+    feature_vector.extend([to_float(tcp_ece_count) if tcp_ece_count is not None else 0.0])
+    feature_vector.extend([to_float(tcp_urg_count) if tcp_urg_count is not None else 0.0])
+    feature_vector.extend([to_float(tcp_ack_count) if tcp_ack_count is not None else 0.0])
+    feature_vector.extend([to_float(tcp_psh_count) if tcp_psh_count is not None else 0.0])
+    feature_vector.extend([to_float(tcp_rst_count) if tcp_rst_count is not None else 0.0])
+    feature_vector.extend([to_float(tcp_syn_count) if tcp_syn_count is not None else 0.0])
+    feature_vector.extend([to_float(tcp_fin_count) if tcp_fin_count is not None else 0.0])
+    feature_vector.extend([to_float(tcp_syn_ratio) if tcp_syn_ratio is not None else 0.0])
+    feature_vector.extend([to_float(tcp_ack_ratio) if tcp_ack_ratio is not None else 0.0])
+    feature_vector.extend([to_float(tcp_rst_ratio) if tcp_rst_ratio is not None else 0.0])
+    # add modbus response features
+    feature_vector.extend([to_float(modbus_response_count) if modbus_response_count is not None else 0.0])
+    feature_vector.extend([to_float(modbus_response_ratio) if modbus_response_ratio is not None else 0.0])
+    feature_vector.extend([to_float(avg_modbus_response_code) if avg_modbus_response_code is not None else 0.0])
+    feature_vector.extend([to_float(modbus_response_present) if modbus_response_present is not None else 0.0])
     
     return feature_vector
 
 def map_hetero_measurement_features(properties: Dict[str, Any]):
     """Map measurement node properties to feature tensor."""
     #logger.info("Mapping measurement features.")
-    categories = global_schema['categorical_mappings']['measurement_type']
-    feature_vector = [0.0] * len(categories)
-    feature_vector_numeric = [0.0] * 3  # for avg_value
+    #categories = global_schema['categorical_mappings']['measurement_type']
+    #feature_vector = [0.0] * len(categories)
+    feature_vector_numeric = [0.0] * 2  # for avg_value and stddev_value
     measure_type = properties.get('measurement_type')
     val = properties.get('avg_value')
-    if measure_type is not None:
-        for i, category in enumerate(categories):
-            if measure_type.lower() == category.lower():
-                feature_vector[i] = 1.0
-    if val is not None:
-        if measure_type == 'state':
-            feature_vector_numeric[0] = to_float(val)
-        elif measure_type == 'pressure':
-            feature_vector_numeric[1] = to_float(val) / 1843.0
-        elif measure_type == 'val':
-            feature_vector_numeric[2] = to_float(val) / 4683.0
-        
-    return feature_vector + feature_vector_numeric
+    stddev_val = properties.get('stddev_value')
+    min_val = properties.get('min_value')
+    max_val = properties.get('max_value')
+    if measure_type != 'state':
+        feature_vector_numeric[0] = to_float(val) if val is not None else 0.0
+        feature_vector_numeric[1] = to_float(stddev_val) if stddev_val is not None and stddev_val > 0.01 else 0.0
+        # feature_vector_numeric.extend([to_float(min_val) if min_val is not None else 0.0])
+        # feature_vector_numeric.extend([to_float(max_val) if max_val is not None else 0.0])
+    else:
+        feature_vector_numeric[0] = to_float(val) if val is not None else 0.0
+        # for 'state' type, we use a binary feature indicating if state changed
+        feature_vector_numeric[1] = to_float(stddev_val) if stddev_val is not None and stddev_val > 0.01 else 0.0
+    
+    
+    return feature_vector_numeric
 
 
 def map_hetero_endpoint_features(properties: Dict[str, Any]):
     """Map endpoint node properties to feature tensor."""
-    logger.info("Mapping endpoint features.")
+    #logger.info("Mapping endpoint features.")
     # build one-hot encoding based on predefined categories
     #categories = global_schema['categorical_mappings']['ip']
     #feature_vector = [0.0] * len(categories)
