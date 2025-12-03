@@ -34,6 +34,7 @@ import seaborn as sns
 import copy
 from captum.attr import IntegratedGradients, Saliency, DeepLift
 from functools import partial
+from sklearn.preprocessing import RobustScaler
 
 # Local application/library specific imports
 from models.gnn import get_label_metrics
@@ -56,79 +57,71 @@ torch.manual_seed(seed)
 np.random.seed(seed)
 y_anomaly_labels = y_labels[1:]  # Exclude normal class (0)
 
-def _model_forward_wrapper(model: nn.Module, data: HeteroData, model_device: str, *node_inputs: torch.Tensor):
+def _fast_model_forward_wrapper(model: nn.Module, data: HeteroData, model_device: str, *node_inputs: torch.Tensor):
     """
-    Wrapper for Captum. Reconstructs the batched graph from the interpolated inputs.
-    Args:
-        model (nn.Module): The GNN model.
-        data (HeteroData): The original single graph data.
-        model_device (str): Device to run the model on.
-        *node_inputs (torch.Tensor): Interpolated node features for each node type.
-                                     This is from Captum during attribution.
+    Optimized wrapper for Captum. Reconstructs the batched graph from interpolated inputs.
     """
-    # Create a new HeteroData object to avoid modifying the original
+    # Create a lightweight container
     temp_data = HeteroData()
     
-    # Copy edge indices
-    temp_data.edge_index_dict = data.edge_index_dict
-    
-    # Get node types that have features
+    # Identify node types with features
     node_types_with_features = [ntype for ntype in data.x_dict.keys() 
                                 if data[ntype].num_nodes > 0 and hasattr(data[ntype], "x")]
     
-    # Determine if we're dealing with batched data
+    # Determine Batching Params
     first_input = node_inputs[0]
     original_num_nodes = data[node_types_with_features[0]].num_nodes
-    new_num_nodes = first_input.size(0)
+    total_nodes = first_input.size(0)
     
-    is_batched = new_num_nodes != original_num_nodes
-    num_replications = new_num_nodes // original_num_nodes if is_batched else 1
+    is_batched = total_nodes != original_num_nodes
+    num_replications = total_nodes // original_num_nodes if is_batched else 1
     
-    # Update node features and batch vectors
-    for idx, ntype in enumerate(node_types_with_features):
-        temp_data[ntype].x = node_inputs[idx]
-        temp_data[ntype].num_nodes = node_inputs[idx].size(0)
-        
-        if is_batched:
-            # Create batch vector for batched graphs
-            original_num = data[ntype].num_nodes
-            batch_ids = torch.arange(num_replications, device=model_device)
-            temp_data[ntype].batch = torch.repeat_interleave(batch_ids, original_num)
-        else:
-            # Single graph case
-            temp_data[ntype].batch = torch.zeros(data[ntype].num_nodes, dtype=torch.long, device=model_device)
     
-    # Update edge indices if batched
-    if is_batched:
-        new_edge_index_dict = {}
-        for etype in data.edge_index_dict.keys():
-            src_ntype, rel, dst_ntype = etype
-            original_edge_index = data.edge_index_dict[etype]
-            
-            # Get node counts for source and destination
-            src_node_count = data[src_ntype].num_nodes
-            dst_node_count = data[dst_ntype].num_nodes
-            
-            replicated_edges = []
-            for i in range(num_replications):
-                src_offset = i * src_node_count
-                dst_offset = i * dst_node_count
-                offset = torch.tensor([[src_offset], [dst_offset]], 
-                                     device=model_device, dtype=torch.long)
-                replicated_edges.append(original_edge_index + offset)
-            
-            new_edge_index_dict[etype] = torch.cat(replicated_edges, dim=1)
-        
-        temp_data.edge_index_dict = new_edge_index_dict
-    
-    # Set num_graphs for proper pooling
     temp_data.num_graphs = num_replications
     
-    # Move to device and run model
-    temp_data = temp_data.to(model_device)
-    logits = model(temp_data)
-    
-    return logits
+
+    # Reconstruct Node Features & Batch Vector
+    for idx, ntype in enumerate(node_types_with_features):
+        temp_data[ntype].x = node_inputs[idx]
+        
+        if is_batched:
+            current_num_nodes = data[ntype].num_nodes
+            # Create batch vector [0,0... 1,1...]
+            batch_ids = torch.arange(num_replications, device=model_device)
+            temp_data[ntype].batch = torch.repeat_interleave(batch_ids, current_num_nodes)
+        else:
+            temp_data[ntype].batch = torch.zeros(data[ntype].num_nodes, dtype=torch.long, device=model_device)
+
+    # Reconstruct Edges (Vectorized)
+    if not is_batched:
+        temp_data.edge_index_dict = data.edge_index_dict
+    else:
+        new_edge_index_dict = {}
+        for etype, edge_index in data.edge_index_dict.items():
+            # Standard edge replication logic
+            num_edges = edge_index.size(1)
+            src_ntype, _, dst_ntype = etype
+            src_count = data[src_ntype].num_nodes
+            dst_count = data[dst_ntype].num_nodes
+            
+            # Create offsets
+            offsets_src = (torch.arange(num_replications, device=model_device) * src_count).view(-1, 1)
+            offsets_dst = (torch.arange(num_replications, device=model_device) * dst_count).view(-1, 1)
+            
+            # Expand edges [2, num_edges] -> [num_reps, 2, num_edges]
+            edges_expanded = edge_index.unsqueeze(0).expand(num_replications, 2, num_edges).clone()
+            
+            # Add offsets
+            edges_expanded[:, 0, :] += offsets_src
+            edges_expanded[:, 1, :] += offsets_dst
+            
+            # Flatten to [2, total_edges]
+            new_edge_index_dict[etype] = edges_expanded.permute(1, 0, 2).reshape(2, -1)
+            
+        temp_data.edge_index_dict = new_edge_index_dict
+
+    # Run Model
+    return model(temp_data)
 
 class GNNHeteroBinEncoderModel(nn.Module):
     """GNN module to produce node embeddings for heterogeneous graphs."""
@@ -142,9 +135,12 @@ class GNNHeteroBinEncoderModel(nn.Module):
 
         hd    = config.get("hidden_dim", 32)
         heads = config.get("num_heads", 4)
+        self.scalers = {
+
+        }
 
         # Which node types to pool over (you can override via config)
-        self.pooled_types: List[str] = config.get("pooled_types", ["Measurements", "Connections", "Endpoints", "Assets"])
+        self.pooled_types: List[str] = config.get("pooled_types", ["Pumps", "FlowSensors", "Tanks", "Valves", "Connections", "Endpoints"])
 
         # Per-node-type input projection to a shared hidden dim
         self.lin_dict = nn.ModuleDict()
@@ -209,6 +205,9 @@ class GNNHeteroAnomalyDetectionModel(nn.Module):
         self.metadata = metadata
         self.config = config
         self.criterion = None
+        self.scalers = {
+            
+        }
         
         hd = config.get("hidden_dim", 32)        
 
@@ -233,18 +232,39 @@ class GNNHeteroAnomalyDetectionModel(nn.Module):
         # Get labels for stratification
         labels = [data.y.item() for data in dataset]
         class_counts = np.bincount(labels, minlength=len(y_labels))
-        min_samples = 8
-        for i, count in enumerate(class_counts):
-            if 0 < count < min_samples:
-                logging.warning(f"Class {y_labels[i]} has only {count} samples, which is less than the minimum required {min_samples}.")
-                # Over-sample this class by duplicating samples
-                needed = min_samples - count
-                # copy needed random samples from this class
-                class_samples = [idx for idx, label in enumerate(labels) if label == i]
-                for _ in range(needed):
-                    sample_idx = np.random.choice(class_samples)
-                    dataset.append(copy.deepcopy(dataset[sample_idx]))
-                    labels.append(i)
+        # min_samples = 8
+        # for i, count in enumerate(class_counts):
+        #     if 0 < count < min_samples:
+        #         logging.warning(f"Class {y_labels[i]} has only {count} samples, which is less than the minimum required {min_samples}.")
+        #         # Over-sample this class by duplicating samples
+        #         needed = min_samples - count
+        #         # copy needed random samples from this class
+        #         class_samples = [idx for idx, label in enumerate(labels) if label == i]
+        #         for _ in range(needed):
+        #             sample_idx = np.random.choice(class_samples)
+        #             dataset.append(copy.deepcopy(dataset[sample_idx]))
+        #             labels.append(i)
+
+        # split dataset for 60% train, 40% validation/final test
+        splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.4, random_state=seed)
+
+        train_idx, test_idx = next(splitter.split(np.zeros(len(labels)), labels))
+
+                # further split test into 20% validation and 20% final test
+        splitter2 = StratifiedShuffleSplit(n_splits=1, test_size=0.5, random_state=seed)
+        test_labels = [labels[i] for i in test_idx]
+
+        relative_val_idx, relative_final_test_idx = next(splitter2.split(np.zeros(len(test_idx)), test_labels))
+
+        # Map relative indices back to original test indices
+        val_idx = [test_idx[i] for i in relative_val_idx]
+        final_test_idx = [test_idx[i] for i in relative_final_test_idx]
+
+        dataset = self.scale_features(dataset, train_idx, val_idx, final_test_idx, node_type='Connections', feature_column_key='Connections')
+        dataset = self.scale_features(dataset, train_idx, val_idx, final_test_idx, node_type='Endpoints', feature_column_key='Endpoints')
+        dataset = self.scale_features(dataset, train_idx, val_idx, final_test_idx, node_type='Tanks', feature_column_key='Tanks')
+        dataset = self.scale_features(dataset, train_idx, val_idx, final_test_idx, node_type='FlowSensors', feature_column_key='FlowSensors')
+        
         bin_dataset = copy.deepcopy(dataset)
         for data in bin_dataset:
             data.y = torch.tensor(0 if data.y.item() == 0 else 1, dtype=torch.long)
@@ -256,20 +276,9 @@ class GNNHeteroAnomalyDetectionModel(nn.Module):
         for data in anom_dataset:
                 data.y = torch.tensor(data.y.item() - 1, dtype=torch.long)
 
-        # split dataset for 60% train, 40% validation/final test
-        splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.4, random_state=seed)
+        
 
-        train_idx, test_idx = next(splitter.split(np.zeros(len(labels)), labels))
 
-        # further split test into 20% validation and 20% final test
-        splitter2 = StratifiedShuffleSplit(n_splits=1, test_size=0.5, random_state=seed)
-        test_labels = [labels[i] for i in test_idx]
-
-        relative_val_idx, relative_final_test_idx = next(splitter2.split(np.zeros(len(test_idx)), test_labels))
-
-        # Map relative indices back to original test indices
-        val_idx = [test_idx[i] for i in relative_val_idx]
-        final_test_idx = [test_idx[i] for i in relative_final_test_idx]
 
         # get anomaly indices in train and val sets, exclude normal class (0), shift by -1 for anomaly classes
         anomaly_train_idx = [i for i in train_idx if anom_dataset[i].y.item() > -1]
@@ -331,7 +340,56 @@ class GNNHeteroAnomalyDetectionModel(nn.Module):
                 f.write(split + "," + ",".join(str(count) for count in counts[1:]) + "\n")
         logging.info("Data split counts exported.")
         return (train_loader, val_loader), (anom_train_loader, anom_val_loader), final_test_loader
+    def scale_features(self, dataset, train_idx, val_idx, final_test_idx, node_type,feature_column_key):
+        ignore_scaling_keywords = ['_bucket_', 'asset_type_', 'protocol_', 'mac_byte_', 'ip_part_',
+                                   'response_present']
+        log_candidates = [
+            'avg_size', 'avg_value','stddev_value', 'min_value','max_value', 'num_connections', 'modbus_response_count',
+            'endpoint_unique_peer_count', 'endpoint_num_unique_protocols',
+            'tcp_cwr_count', 'tcp_ece_count', 'tcp_urg_count', 'tcp_ack_count', 
+            'tcp_psh_count', 'tcp_rst_count', 'tcp_syn_count', 'tcp_fin_count',
+            'endpoint_in_out_ratio','endpoint_num_unique_ports', 'endpoint_port_entropy',
+        ]
 
+        if node_type not in self.scalers:
+            self.scalers[node_type] = {}
+
+        connection_features = get_hetero_column_names(feature_column_key)
+        for feature_name in [f for f in connection_features if not any(keyword in f for keyword in ignore_scaling_keywords)]:
+            feature_idx = connection_features.index(feature_name)
+                        
+            # gather all values for this feature from training set
+            values = []
+            for idx in train_idx:
+                data = dataset[idx]
+                if node_type in data.x_dict:
+                    values.append(data.x_dict[node_type][:, feature_idx].cpu().numpy())
+            values = np.concatenate(values)
+            # apply log1p scaling to candidates
+            if feature_name in log_candidates:
+                values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
+                values = np.log1p(np.maximum(values, 0))
+            scaler = RobustScaler()
+            scaler.fit(values.reshape(-1, 1))
+            self.scalers[node_type][feature_name] = scaler
+
+            for idx in train_idx:
+                data = dataset[idx]
+                if node_type in data.x_dict:
+                    
+                    data.x_dict[node_type][:, feature_idx] = torch.where(data.x_dict[node_type][:, feature_idx] < 0.01, torch.tensor(0.0, device=data.x_dict[node_type].device), data.x_dict[node_type][:, feature_idx])
+                    data.x_dict[node_type][:, feature_idx] = torch.log1p(torch.maximum(data.x_dict[node_type][:, feature_idx], torch.tensor(0.0, device=data.x_dict[node_type].device)))
+                    data.x_dict[node_type][:, feature_idx] = torch.from_numpy(scaler.transform(data.x_dict[node_type][:, feature_idx].cpu().numpy().reshape(-1, 1))).to(data.x_dict[node_type].device).float().to(data.x_dict[node_type].device).view(-1)
+                    
+            # apply scaling to val and final test sets
+            for idx in val_idx + final_test_idx:
+                data = dataset[idx]
+                if node_type in data.x_dict:                    
+                    data.x_dict[node_type][:, feature_idx] = torch.where(data.x_dict[node_type][:, feature_idx] < 0.01, torch.tensor(0.0, device=data.x_dict[node_type].device), data.x_dict[node_type][:, feature_idx])
+                    data.x_dict[node_type][:, feature_idx] = torch.log1p(torch.maximum(data.x_dict[node_type][:, feature_idx], torch.tensor(0.0, device=data.x_dict[node_type].device)))
+                    data.x_dict[node_type][:, feature_idx] = torch.from_numpy(scaler.transform(data.x_dict[node_type][:, feature_idx].cpu().numpy().reshape(-1, 1))).to(data.x_dict[node_type].device).float().to(data.x_dict[node_type].device).view(-1)
+                    
+        return dataset
 
     def get_criterion(self, data_loader: DataLoader) -> nn.Module:
         """Get loss function with class weights to handle class imbalance."""
@@ -378,9 +436,12 @@ class GNNHeteroAnomalyDetectionModel(nn.Module):
                 optimizer.zero_grad()
                 bin_logits= self(batch)      # [B], [B,5]                
                 y_bin = (y != 0).long()
-                loss = 0.0
-                lossA = self.criterion(bin_logits, y_bin.float())
-                loss = loss + lossA
+                
+                loss = self.criterion(bin_logits, y_bin.float())
+                # Add L1 regularization to the loss 
+                l1_lambda = 5e-5
+                l1_norm = sum(p.abs().sum() for p in self.parameters())
+                loss = loss + l1_lambda * l1_norm
 
                 loss.backward()
                 optimizer.step()
@@ -388,7 +449,7 @@ class GNNHeteroAnomalyDetectionModel(nn.Module):
                 total_loss += loss.item() * batch.size(0)
                 total_num += batch.size(0)
 
-                bin_preds = (torch.sigmoid(bin_logits) >= 0.4).long()
+                bin_preds = (torch.sigmoid(bin_logits) >= 0.5).long()
                 pred = bin_preds.clone()                
                 y_all.extend(y_bin.detach().cpu().tolist())
                 y_pred_all.extend(pred.detach().cpu().tolist())
@@ -470,18 +531,18 @@ class GNNHeteroAnomalyDetectionModel(nn.Module):
         learning_rate = config.get("learning_rate", 0.001)
         patience = config.get("early_stopping_patience", 10)
         min_delta = config.get("early_stopping_min_delta", 0.0001)
-        weight_decay = config.get("weight_decay", 0.0001)
+        weight_decay = config.get("weight_decay", 1e-5)
 
         criterion = self.get_criterion(train_loader)
         optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='max', factor=0.1, patience=5, min_lr=1e-5)
-        early_stop_mode = 'max'
+            optimizer, factor=0.5, patience=10,min_lr=1e-6)
+        early_stop_mode = 'min'  # We want to maximize F1 score
         early_stopper = GNNEarlyStopping(patience=patience, min_delta=min_delta, mode=early_stop_mode)
         best_val_metrics = None
         best_model_state = None
-        early_stop_metric = 'f1_score'
+        early_stop_metric = 'loss'
         
 
         logging.info("Stage 1: Training with binary head only for %d epochs...", config.get("stage1_epochs", 10))
@@ -583,132 +644,202 @@ class GNNHeteroAnomalyDetectionModel(nn.Module):
         weights = weights / np.sum(weights) * len(counts)  # normalize
         weights[~np.isfinite(weights)] = epsilon  # handle any inf or nan
         return weights
-    
-    def explain_with_captum(self, data: HeteroData):
-        """Generate explanations for the model's predictions using Captum.
-        We assume prediction has already been made and is an anomaly.
-        Focusing on node and node feature importance."""
-        self.eval()
 
-        # Get model prediction
+    def explain_with_captum(self, data: HeteroData, save_dir="./exports/explanations"):
+        """
+        Generates explanations with Snapshot ID, True/Pred Y, and Global Feature Plots.
+        """
+        self.eval()
+        os.makedirs(save_dir, exist_ok=True)
+        timestamp = int(time.time())
+
+        # Extract Metadata (Snapshot, True Y, etc.)
+        # Handle Snapshot ID (support string, int, or tensor)
+        snapshot_id = "unknown"
+        if hasattr(data, 'snapshot_id'):
+            s_id = data.snapshot_id
+            if torch.is_tensor(s_id):
+                snapshot_id = str(s_id.item()) if s_id.numel() == 1 else str(s_id.tolist())
+            else:
+                snapshot_id = str(s_id)
+        
+        # Handle True Label
+        true_label_idx = data.y.item() if hasattr(data, 'y') and data.y.numel() == 1 else -1
+        true_label_name = y_labels[true_label_idx] if 0 <= true_label_idx < len(y_labels) else "Unknown"
+
+        # Get Model Prediction
         data = data.to(DEVICE)
         batch = Batch.from_data_list([data]).to(DEVICE)
+        
         with torch.no_grad():
-            bin_logits = self(batch)
-            pred = (torch.sigmoid(bin_logits) >= 0.5).long().item()
-        
-        logging.info("Model prediction for explanation: class %d (%s)", pred, y_bin_labels[pred])
+            logits = self(batch)
+            pred_class = (torch.sigmoid(logits) >= 0.5).long().item()
+            pred_prob = torch.sigmoid(logits).max().item()
+            pred_label_name = y_labels[pred_class]
 
-        # Prepare inputs for Captum
-        # Use the original single graph data (not batch) for the wrapper
-        # This avoids issues with batch vectors
-        inputs_list = [] 
-        node_types_with_features = []
-        
-        for ntype in data.x_dict.keys():
-            if data[ntype].num_nodes > 0 and hasattr(data[ntype], "x"):
-                # Clone and enable gradients
-                tensor = data[ntype].x.clone().detach().requires_grad_(True)
-                inputs_list.append(tensor)
-                node_types_with_features.append(ntype)
-
-        inputs_tuple = tuple(inputs_list)
-        
-        # Create baselines from the new tuple
-        baselines_tuple = tuple(torch.zeros_like(tensor) for tensor in inputs_tuple)
-
-        # Create the forward_func for Captum
-        # Be sure to pass the original single-graph data, not the batch
-        forward_func = partial(
-            _model_forward_wrapper,
-            self,
-            data,  # Use original data, not batch
-            DEVICE
-        )
-
-        # Initialize and run Integrated Gradients
-        ig = IntegratedGradients(forward_func=forward_func)
-        
-        try:
-            attributions_tuple = ig.attribute(
-                inputs=inputs_tuple,
-                baselines=baselines_tuple,
-                target=None,
-                n_steps=50
-            )
-        except Exception as e:
-            logging.error("Error during Captum attribution: %s", e)
-            logging.error("Traceback:", exc_info=True)
+        # Filter: Only explain anomalies (Optional: remove if you want to explain everything)
+        if pred_class == 0:
+            logging.info(f"Skipping explanation for Normal traffic (Snapshot: {snapshot_id}).")
             return None
 
-        # Process and save the results
-        explanation_results = {
-            "predicted_class": pred,
-            "predicted_label": y_bin_labels[pred],
-            "node_feat_mask": {},  # For feature importance
-            "node_importance": {}  # For node importance
+        logging.info(f"Explaining Snapshot {snapshot_id}: True: {true_label_name} -> Pred: {pred_label_name} ({pred_prob:.4f})")
+
+        # Prepare Inputs for Captum
+        inputs_list = []
+        node_types = []
+        for ntype in data.x_dict.keys():
+            if data[ntype].num_nodes > 0 and hasattr(data[ntype], "x"):
+                inputs_list.append(data[ntype].x.clone().detach().requires_grad_(True))
+                node_types.append(ntype)
+
+        inputs_tuple = tuple(inputs_list)
+        baselines_tuple = tuple(torch.zeros_like(t) for t in inputs_tuple)
+
+        # Run Attribution
+        # Uses the static wrapper defined previously
+        forward_func = partial(_fast_model_forward_wrapper, self, data, DEVICE)
+        ig = IntegratedGradients(forward_func=forward_func)
+
+        try:
+            attributions = ig.attribute(
+                inputs=inputs_tuple,
+                baselines=baselines_tuple,
+                target=pred_class,
+                n_steps=50,
+                internal_batch_size=10
+            )
+        except Exception as e:
+            logging.error(f"Error during IG attribution for Snapshot {snapshot_id}: {e}")
+            return None
+
+        # Process Results ---
+        explanation_data = {
+            "meta": {
+                "timestamp": timestamp,
+                "snapshot_id": snapshot_id,
+                "true_y": true_label_idx,
+                "true_label": true_label_name,
+                "predicted_y": pred_class,
+                "predicted_label": pred_label_name,
+                "confidence": pred_prob
+            },
+            "node_importances": [],
+            "feature_importances": {}
         }
+        
+        all_node_rankings = []
+        global_feature_records = [] # For the Bar Chart
 
-        for idx, ntype in enumerate(node_types_with_features):
-            # Get attributions for this node type
-            node_attr = attributions_tuple[idx]
+        for idx, ntype in enumerate(node_types):
+            attr_tensor = attributions[idx].detach().cpu()
             
-            # Calculate Node Importance
-            # Sum absolute attributions across features for each node            
-            node_importance_summary = node_attr.abs().sum(dim=1)
-            explanation_results["node_importance"][ntype] = node_importance_summary.detach().cpu().numpy().tolist()
+            # Feature Importance
+            feat_imp = attr_tensor.abs().mean(dim=0).numpy()
+            num_features = len(feat_imp)
             
-            # Log top 3 most important nodes for this type
-            top_k = min(3, node_importance_summary.shape[0])
-            if top_k > 0:
-                top_nodes = torch.topk(node_importance_summary, k=top_k)
-                logging.info(f"  Top {top_k} important nodes for '{ntype}':")
-                for i in range(top_k):
-                    logging.info(f"    - Node Index: {top_nodes.indices[i].item()}, "
-                            f"Importance: {top_nodes.values[i].item():.4f}")
-
-            # Calculate Feature Importance
-            # Average attributions across nodes for each feature            
-            feature_importance_summary = node_attr.abs().mean(dim=0)
-            explanation_results["node_feat_mask"][ntype] = feature_importance_summary.detach().cpu().numpy().tolist()
-
-            # Get feature names for this specific node type
+            # Safe Name Mapping
+            col_names = []
             try:
-                feature_names = get_hetero_column_names(ntype)
-            except Exception as e:
-                logging.warning(f"Could not get feature names for {ntype}: {e}")
-                feature_names = [f"feat_{i}" for i in range(len(feature_importance_summary))]
-            
-            # Only plot if there are features
-            if len(feature_importance_summary) > 0:
-                plt.figure(figsize=(12, 6))
-                plt.bar(range(len(feature_importance_summary)), feature_importance_summary.detach().cpu().numpy())
-                plt.xticks(range(len(feature_importance_summary)), feature_names, rotation=45, ha='right')
-                plt.xlabel('Features')
-                plt.ylabel('Importance (Average Absolute Attribution)')
-                plt.title(f'Feature Importance for {ntype} (Prediction: {y_bin_labels[pred]})')
-                plt.tight_layout()
-                plt.savefig(f'./exports/images/gnn_het_captum_detection_node_feat_importance_{ntype}_{int(time.time())}.png', dpi=150)
-                plt.close()
-                
-                # Log top 5 important features
-                top_feat_k = min(5, len(feature_importance_summary))
-                if top_feat_k > 0:
-                    top_feats = torch.topk(feature_importance_summary, k=top_feat_k)
-                    logging.info(f"  Top {top_feat_k} important features for '{ntype}':")
-                    for i in range(top_feat_k):
-                        feat_idx = top_feats.indices[i].item()
-                        feat_name = feature_names[feat_idx] if feat_idx < len(feature_names) else f"feat_{feat_idx}"
-                        logging.info(f"    - {feat_name}: {top_feats.values[i].item():.4f}")
+                col_name_key = ntype
+                if ntype in ["TankMeasurements", "ValveMeasurements"]:
+                    col_name_key = "Measurements"
+                elif ntype in ["PumpMeasurements", "SensorMeasurements"]:
+                    col_name_key = "StateMeasurements"
+                else:
+                    if not ntype.endswith("s"):
+                        col_name_key = ntype + "s"
+                col_names = get_hetero_column_names(col_name_key)
+            except Exception:
+                pass
 
-        # Save explanation results to JSON
-        output_path = f'./exports/results/gnn_het_captum_detection_explanation_{int(time.time())}.json'
-        with open(output_path, 'w') as f:
-            json.dump(explanation_results, f, indent=2)
+            if len(col_names) != num_features:
+                col_names = [f"feat_{i}" for i in range(num_features)]
+
+            # Store in JSON
+            explanation_data["feature_importances"][ntype] = {
+                k: float(v) for k, v in zip(col_names, feat_imp)
+            }
+
+            # Collect for Global Plot
+            for fname, fscore in zip(col_names, feat_imp):
+                global_feature_records.append({
+                    "node_type": ntype,
+                    "feature": fname,
+                    "full_name": f"{ntype}: {fname}",
+                    "score": float(fscore)
+                })
+
+            # Node Importance & Mapping
+            node_imp = attr_tensor.abs().sum(dim=1).numpy()
+            num_nodes = len(node_imp)
+            
+            # Safe ID Mapping
+            orig_ids = []
+            if hasattr(data[ntype], 'original_id'):
+                raw = data[ntype].original_id
+                orig_ids = raw.tolist() if torch.is_tensor(raw) else raw
+            elif hasattr(data[ntype], 'n_id'):
+                orig_ids = data[ntype].n_id.tolist()
+            
+            if len(orig_ids) != num_nodes:
+                orig_ids = [f"{ntype}_{i}" for i in range(num_nodes)]
+
+            # Create Records
+            for i, score in enumerate(node_imp):
+                if score > 1e-4:
+                    record = {
+                        "snapshot_id": snapshot_id, # Added to record
+                        "node_type": ntype,
+                        "pyg_index": i,
+                        "original_id": str(orig_ids[i]),
+                        "importance_score": float(score),
+                        "true_label": true_label_name,
+                        "pred_label": pred_label_name
+                    }
+                    explanation_data["node_importances"].append(record)
+                    all_node_rankings.append(record)
+
+        # Generate Global Top 5 Feature Plot
+        if global_feature_records:
+            # Sort by score descending
+            global_feature_records.sort(key=lambda x: x['score'], reverse=True)
+            top_5_features = global_feature_records[:5]
+            
+            # Extract data for plotting
+            plot_names = [x['full_name'] for x in top_5_features]
+            plot_scores = [x['score'] for x in top_5_features]
+            
+            # Plotting
+            plt.figure(figsize=(10, 6))
+            sns.barplot(x=plot_scores, y=plot_names, palette="viridis")
+            plt.title(f"Top 5 Features (Snapshot {snapshot_id})\nTrue: {true_label_name} | Pred: {pred_label_name}")
+            plt.xlabel("Mean Absolute Attribution")
+            plt.tight_layout()
+            
+            # Save Plot
+            plot_path = f"{save_dir}/plot_top5_feats_snap{snapshot_id}_{timestamp}.png"
+            plt.savefig(plot_path)
+            plt.close() 
+            
+            # Add top 5 to explanation data for easy access
+            explanation_data["top_5_global_features"] = top_5_features
+
+        # Export Files
+        all_node_rankings.sort(key=lambda x: x['importance_score'], reverse=True)
         
-        logging.info(f"Explanation results saved to {output_path}")
-        
-        return explanation_results
+        # Save JSON
+        json_path = f"{save_dir}/explanation_snap{snapshot_id}_{timestamp}.json"
+        with open(json_path, 'w') as f:
+            json.dump(explanation_data, f, indent=2)
+            
+        # Save CSV
+        node_df = pd.DataFrame(all_node_rankings)
+        if not node_df.empty:
+            node_csv_path = f"{save_dir}/ranking_snap{snapshot_id}_{timestamp}.csv"
+            node_df.head(50).to_csv(node_csv_path, index=False)
+            
+        logging.info(f"Saved explanations and plot for snapshot {snapshot_id} to {save_dir}")
+        return explanation_data       
 
 class GNNEarlyStopping:
     """Early stopping utility to stop training when 
@@ -732,9 +863,9 @@ class GNNEarlyStopping:
         elif self.mode == 'min' and val < self.best_score - self.min_delta:
             self.best_score = val
             self.counter = 0
-        elif val == 0.0:
-            # special case to avoid early stopping at beginning
-            pass
+        # elif val == 0.0:
+        #     # special case to avoid early stopping at beginning
+        #     pass
         else:
             self.counter += 1
             if self.counter >= self.patience:

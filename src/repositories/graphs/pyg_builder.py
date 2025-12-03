@@ -56,6 +56,8 @@ global_schema = {
 #y_labels = ['normal', 'anomaly', 'scan', 'dos', 'mitm', 'physical fault']
 y_labels = ['normal', 'scan', 'dos', 'mitm', 'physical fault']
 y_bin_labels = ['normal', 'anomaly']
+y_anomaly_labels = ['scan', 'dos', 'mitm', 'physical fault']
+y_anomaly_Index_mapback = [1,2,3,4]
 
 # physical asset types
 physical_asset_types = ['Pump', 'Valve', 'Tank', 'FlowSensor']
