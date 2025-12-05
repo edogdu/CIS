@@ -11,5 +11,6 @@ class PhysicalAggregate(BaseModel):
     avg_value: float = Field(..., description="Average sensor reading in the bucket")
     min_value: float = Field(..., description="Minimum sensor reading in the bucket")
     max_value: float = Field(..., description="Maximum sensor reading in the bucket")
+    stddev_value: Optional[float] = Field(..., description="Standard deviation of sensor readings in the bucket")
     num_measurements: int = Field(..., description="Number of readings in the bucket")
     
