@@ -28,6 +28,7 @@ from torch_geometric.nn import (
     Linear,
     global_max_pool,
 )
+from models.focal_loss import FocalLoss
 import copy
 from captum.attr import IntegratedGradients, Saliency, DeepLift
 from functools import partial
@@ -381,13 +382,13 @@ class GNNHeteroClassifierModel(nn.Module):
             train_metrics = self.train_epoch(train_loader, optimizer)
             val_metrics = self.evaluate_model(val_loader)
             logging.info("Stage 2 Epoch %d: Train Loss: %.4f, Val Loss: %.4f, Val F1: %.4f",
-                        epoch+1, train_metrics["loss"], val_metrics["loss"], val_metrics[early_stop_metric])
+                        epoch+1, train_metrics["loss"], val_metrics["loss"], val_metrics["f1_score"])
             scheduler.step(val_metrics[early_stop_metric])
             # Check for early stopping
             if best_val_metrics is None or (early_stop_mode == 'max' and val_metrics[early_stop_metric] > best_val_metrics[early_stop_metric]) or (early_stop_mode == 'min' and val_metrics[early_stop_metric] < best_val_metrics[early_stop_metric]):
                 best_val_metrics = val_metrics
                 best_model_state = self.state_dict()
-                logging.info("New best model found at epoch %d with F1 Score: %.4f", epoch, val_metrics[early_stop_metric])
+                logging.info("New best model found at epoch %d with %s: %.4f", epoch, early_stop_metric, val_metrics[early_stop_metric])
 
             early_stopper.step(val_metrics[early_stop_metric])
             if early_stopper.early_stop:
@@ -651,7 +652,7 @@ class GNNHeteroClassifierModel(nn.Module):
             plt.tight_layout()
             
             # Save Plot
-            plot_path = f"{save_dir}/plot_top5_feats_snap{snapshot_id}_{timestamp}.png"
+            plot_path = f"{save_dir}/classify_plot_top5_feats_snap{snapshot_id}_{timestamp}.png"
             plt.savefig(plot_path)
             plt.close() 
             
@@ -662,14 +663,14 @@ class GNNHeteroClassifierModel(nn.Module):
         all_node_rankings.sort(key=lambda x: x['importance_score'], reverse=True)
         
         # Save JSON
-        json_path = f"{save_dir}/explanation_snap{snapshot_id}_{timestamp}.json"
+        json_path = f"{save_dir}/classify_explanation_snap{snapshot_id}_{timestamp}.json"
         with open(json_path, 'w') as f:
             json.dump(explanation_data, f, indent=2)
             
         # Save CSV
         node_df = pd.DataFrame(all_node_rankings)
         if not node_df.empty:
-            node_csv_path = f"{save_dir}/ranking_snap{snapshot_id}_{timestamp}.csv"
+            node_csv_path = f"{save_dir}/classify_ranking_snap{snapshot_id}_{timestamp}.csv"
             node_df.head(50).to_csv(node_csv_path, index=False)
             
         logging.info(f"Saved explanations and plot for snapshot {snapshot_id} to {save_dir}")

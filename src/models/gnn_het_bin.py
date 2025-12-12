@@ -28,7 +28,7 @@ from torch_geometric.nn import (
     Linear,
     global_max_pool,
 )
-
+from models.focal_loss import FocalLoss
 from matplotlib import pyplot as plt
 import seaborn as sns
 import copy
@@ -208,6 +208,7 @@ class GNNHeteroAnomalyDetectionModel(nn.Module):
         self.scalers = {
             
         }
+        self.bin_threshold = config.get("bin_threshold", 0.5)
         
         hd = config.get("hidden_dim", 32)        
 
@@ -401,7 +402,7 @@ class GNNHeteroAnomalyDetectionModel(nn.Module):
         neg = (ys == 0).sum().item()
         # Avoid div-by-zero; if no positives, fall back to 1.0
         pos_weight_scalar = float(neg / pos) if pos > 0 else 1.0
-        pos_weight_scalar = min(pos_weight_scalar, 10.0)  # cap at 10.0 to avoid extreme weights
+        pos_weight_scalar = min(pos_weight_scalar, 5.0)  # cap at 5.0 to avoid extreme weights
         bin_criterion = nn.BCEWithLogitsLoss(
             pos_weight=torch.tensor(pos_weight_scalar, dtype=torch.float32, device=DEVICE)
         )
@@ -416,7 +417,7 @@ class GNNHeteroAnomalyDetectionModel(nn.Module):
         data = data.to(DEVICE)
         batch = Batch.from_data_list([data]).to(DEVICE)
         bin_logits = self(batch)      # [B], [B,5]
-        bin_preds = (torch.sigmoid(bin_logits) >= 0.5).long()
+        bin_preds = (torch.sigmoid(bin_logits) >= self.bin_threshold).long()
         return bin_preds.detach().cpu().tolist()
     
     # Training and evaluation functions
@@ -439,9 +440,9 @@ class GNNHeteroAnomalyDetectionModel(nn.Module):
                 
                 loss = self.criterion(bin_logits, y_bin.float())
                 # Add L1 regularization to the loss 
-                l1_lambda = 5e-5
-                l1_norm = sum(p.abs().sum() for p in self.parameters())
-                loss = loss + l1_lambda * l1_norm
+                # l1_lambda = 1e-4
+                # l1_norm = sum(p.abs().sum() for p in self.parameters())
+                # loss = loss + l1_lambda * l1_norm
 
                 loss.backward()
                 optimizer.step()
@@ -449,7 +450,7 @@ class GNNHeteroAnomalyDetectionModel(nn.Module):
                 total_loss += loss.item() * batch.size(0)
                 total_num += batch.size(0)
 
-                bin_preds = (torch.sigmoid(bin_logits) >= 0.5).long()
+                bin_preds = (torch.sigmoid(bin_logits) >= self.bin_threshold).long()
                 pred = bin_preds.clone()                
                 y_all.extend(y_bin.detach().cpu().tolist())
                 y_pred_all.extend(pred.detach().cpu().tolist())
@@ -514,7 +515,7 @@ class GNNHeteroAnomalyDetectionModel(nn.Module):
 
             total_loss += loss.item() * y.size(0)
             total_num += y.size(0)
-            preds = (torch.sigmoid(bin_logits) >= 0.5).long()
+            preds = (torch.sigmoid(bin_logits) >= self.bin_threshold).long()
             y_all.extend(y_bin.detach().cpu().tolist())
             y_pred_all.extend(preds.detach().cpu().tolist())
         mean_loss = total_loss / max(1, total_num)
@@ -536,9 +537,10 @@ class GNNHeteroAnomalyDetectionModel(nn.Module):
         criterion = self.get_criterion(train_loader)
         optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, factor=0.5, patience=10,min_lr=1e-6)
         early_stop_mode = 'min'  # We want to maximize F1 score
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,mode=early_stop_mode, factor=0.5, patience=10,min_lr=1e-6)
+        
         early_stopper = GNNEarlyStopping(patience=patience, min_delta=min_delta, mode=early_stop_mode)
         best_val_metrics = None
         best_model_state = None
@@ -602,7 +604,7 @@ class GNNHeteroAnomalyDetectionModel(nn.Module):
             
             total_loss += loss.item() * y.size(0)
             total_num += y.size(0)
-            bin_preds = (torch.sigmoid(bin_logits) >= 0.5).long()
+            bin_preds = (torch.sigmoid(bin_logits) >= self.bin_threshold).long()
             
             logging.info("Batch true labels (binary): %s", y_bin.detach().cpu().tolist())
             y_all.extend(y_bin.detach().cpu().tolist())
@@ -673,7 +675,7 @@ class GNNHeteroAnomalyDetectionModel(nn.Module):
         
         with torch.no_grad():
             logits = self(batch)
-            pred_class = (torch.sigmoid(logits) >= 0.5).long().item()
+            pred_class = (torch.sigmoid(logits) >= self.bin_threshold).long().item()
             pred_prob = torch.sigmoid(logits).max().item()
             pred_label_name = y_labels[pred_class]
 
@@ -817,7 +819,7 @@ class GNNHeteroAnomalyDetectionModel(nn.Module):
             plt.tight_layout()
             
             # Save Plot
-            plot_path = f"{save_dir}/plot_top5_feats_snap{snapshot_id}_{timestamp}.png"
+            plot_path = f"{save_dir}/bin_plot_top5_feats_snap{snapshot_id}_{timestamp}.png"
             plt.savefig(plot_path)
             plt.close() 
             
@@ -828,14 +830,14 @@ class GNNHeteroAnomalyDetectionModel(nn.Module):
         all_node_rankings.sort(key=lambda x: x['importance_score'], reverse=True)
         
         # Save JSON
-        json_path = f"{save_dir}/explanation_snap{snapshot_id}_{timestamp}.json"
+        json_path = f"{save_dir}/bin_explanation_snap{snapshot_id}_{timestamp}.json"
         with open(json_path, 'w') as f:
             json.dump(explanation_data, f, indent=2)
             
         # Save CSV
         node_df = pd.DataFrame(all_node_rankings)
         if not node_df.empty:
-            node_csv_path = f"{save_dir}/ranking_snap{snapshot_id}_{timestamp}.csv"
+            node_csv_path = f"{save_dir}/bin_ranking_snap{snapshot_id}_{timestamp}.csv"
             node_df.head(50).to_csv(node_csv_path, index=False)
             
         logging.info(f"Saved explanations and plot for snapshot {snapshot_id} to {save_dir}")
