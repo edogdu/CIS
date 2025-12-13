@@ -1,0 +1,23 @@
+# Ignore Python cache files and folders
+__pycache__/
+*.pyc
+
+# Ignore downloaded files
+#*.json
+*.xml
+
+# Ignore VSCode folders
+.vscode/
+.idea/
+# Using Large File Storage (LFS) for large data files
+#data/**/*.csv
+#*.pcap
+.env
+.env.*
+.DS_Store
+/**/Logs/*
+./**/.venv
+.venv/
+!.gitkeep
+*.log
+ragAnythingSecrets.json
