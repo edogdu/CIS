@@ -1,7 +1,0 @@
-asset_type_HMI
-asset_type_PLC
-asset_type_Pump
-asset_type_Valv
-asset_type_Flow Sensor
-asset_type_Tank
-asset_type_PressureSensor

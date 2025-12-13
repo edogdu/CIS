@@ -1,9 +1,0 @@
-streamlit 
-neo4j 
-psycopg[binary]>=3.2
-pandas 
-streamlit-agraph
-plotly 
-python-dotenv
-requests
-neo4j-viz==0.1.6

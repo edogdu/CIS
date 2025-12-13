@@ -1,8 +1,0 @@
-ip_PLC_1_IP
-ip_PLC_2_IP
-ip_PLC_3_IP
-ip_PLC_4_IP
-ip_HMI_1_IP
-ip_Flow_sensor_1_IP
-ip_Flow_sensor_2_IP
-ip_OTHER
