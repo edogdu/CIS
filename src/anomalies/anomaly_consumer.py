@@ -54,15 +54,16 @@ def _train_and_eval_detector_classifier_sync(dataset, y_counts):
     log.info(f"Label distribution: " + ", ".join([f"{index_to_ylabel(i)}: {count}" for i, count in enumerate(y_counts)]))
     
     config = {
-        "hidden_dim": 84,
+        "hidden_dim": 64,
         "dropout": 0.5,
         "learning_rate": 0.005,
         "weight_decay": 5e-5,
         "num_layers": 3,
         "early_stopping_patience": 40,
         "early_stopping_min_delta": 5e-4,
-        "max_epochs": 300,
-        "num_heads": 4
+        "max_epochs": 150,
+        "num_heads": 2,
+        "bin_threshold": 0.6
     }
 
     classify_config = {
