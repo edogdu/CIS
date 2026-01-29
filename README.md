@@ -99,6 +99,42 @@ Navigate to the following URL:
 
 http://localhost:8050/
 
+## **Results**
+### Classification report for the standard GNN model (loss + sigmoid)
+|              | Precision | Recall   | F1-Score | Support  |
+| :----------: | :-------: | :------: | :------: | :------: |
+| 0            | 0.67      | 1.00     | 0.80     | 49.0     |
+| 1            | 1.00      | 0.04     | 0.08     | 25.0     |
+| Accuracy     | 0.68      | 0.68     | 0.68     | 74.0     |
+| Macro avg    | 0.84      | 0.52     | 0.44     | 74.0     |
+| Weighted avg | 0.78      | 0.68     | 0.56     | 74.0     |
+
+The standard GNN with loss and sigmoid functions struggles to learn any pattern predicting nominal or anomalous behavior.
+
+
+
+### Detection performance comparison for the GNN-AE single model and an XGBoost anomaly classifier.
+|                            | Accuracy  | Recall | Precision | F1-Score |
+| :------------------------: | :-------: | :----: | :-------: | :------: |
+| GNN Anomaly Detection      | 0.88      | 0.64   | 1.00      | 0.78     |
+| XGBoost Anomaly Classifier | 0.99      | 0.98   | 0.98      | 0.98     |
+
+Our GNN-AE model correctly classifies most cases, but misses some anomalies. Our GNN model struggles with false negatives, while our anomaly classifier detects almost all anomalies. However, the GNN model only raises an alarm when it is absolutely certain. The anomaly classifier is slightly less strict than our GNN. The imbalance in our GNN model between perfect precision and weak recall drags down its F1-score, so it trades caution for coverage. Our anomaly classifier is more balanced, showing strong precision and recall.
+
+
+
+### Classification report
+| Class          | Precision | Recall   | F1-Score | Support  |
+| :------------: | :-------: | :------: | :------: | :------: |
+| normal         | 0.94      | 0.79     | 0.85     | 56.0     |
+| scan           | 0.12      | 0.33     | 0.18     | 3.0      |
+| dos            | 0.50      | 1.00     | 0.67     | 2.0      |
+| mitm           | 1.00      | 1.00     | 1.00     | 5.0      |
+| physical fault | 0.50      | 0.62     | 0.56     | 8.0      |
+| Accuracy       |           |          | 0.77     | 74.0     |
+| Macro avg      | 0.61      | 0.75     | 0.65     | 74.0     |
+| Weighted avg   | 0.85      | 0.77     | 0.80     | 74.0     |
+
 ## **Troubleshooting**
 ### Notes about Ports
 * The following have had their ports mapped to non-standard ports to avoid collision with UCKG
