@@ -99,6 +99,7 @@ Navigate to the following URL:
 
 http://localhost:8050/
 
+<<<<<<< HEAD
 ## **Results**
 ### Classification report for the standard GNN model (loss + sigmoid)
 |              | Precision | Recall   | F1-Score | Support  |
@@ -133,6 +134,8 @@ Our GNN-AE model correctly classifies most cases, but misses some anomalies.
 
  Our GNN model struggles with false negatives, while our anomaly classifier detects almost all anomalies. However, the GNN model only raises an alarm when it is absolutely certain. The anomaly classifier is slightly less strict than our GNN. The imbalance in our GNN model between perfect precision and weak recall drags down its F1-score, so it trades caution for coverage. Our anomaly classifier is more balanced, showing strong precision and recall.
 
+=======
+>>>>>>> parent of 4bfefbe (Add large dataset files with Git LFS)
 ## **Troubleshooting**
 ### Notes about Ports
 * The following have had their ports mapped to non-standard ports to avoid collision with UCKG
