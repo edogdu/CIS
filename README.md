@@ -111,19 +111,7 @@ http://localhost:8050/
 
 The standard GNN with loss and sigmoid functions struggles to learn any pattern predicting nominal or anomalous behavior.
 
-
-
-### Detection performance comparison for the GNN-AE single model and an XGBoost anomaly classifier.
-|                            | Accuracy  | Recall | Precision | F1-Score |
-| :------------------------: | :-------: | :----: | :-------: | :------: |
-| GNN Anomaly Detection      | 0.88      | 0.64   | 1.00      | 0.78     |
-| XGBoost Anomaly Classifier | 0.99      | 0.98   | 0.98      | 0.98     |
-
-Our GNN-AE model correctly classifies most cases, but misses some anomalies. Our GNN model struggles with false negatives, while our anomaly classifier detects almost all anomalies. However, the GNN model only raises an alarm when it is absolutely certain. The anomaly classifier is slightly less strict than our GNN. The imbalance in our GNN model between perfect precision and weak recall drags down its F1-score, so it trades caution for coverage. Our anomaly classifier is more balanced, showing strong precision and recall.
-
-
-
-### Classification report
+### Classification report GNN-AE single model with XGBoost anomaly classifier
 | Class          | Precision | Recall   | F1-Score | Support  |
 | :------------: | :-------: | :------: | :------: | :------: |
 | normal         | 0.94      | 0.79     | 0.85     | 56.0     |
@@ -134,6 +122,16 @@ Our GNN-AE model correctly classifies most cases, but misses some anomalies. Our
 | Accuracy       |           |          | 0.77     | 74.0     |
 | Macro avg      | 0.61      | 0.75     | 0.65     | 74.0     |
 | Weighted avg   | 0.85      | 0.77     | 0.80     | 74.0     |
+
+Our GNN-AE model correctly classifies most cases, but misses some anomalies.
+
+### Detection performance comparison for the GNN-AE single model and an XGBoost anomaly classifier.
+|                            | Accuracy  | Recall | Precision | F1-Score |
+| :------------------------: | :-------: | :----: | :-------: | :------: |
+| GNN Anomaly Detection      | 0.88      | 0.64   | 1.00      | 0.78     |
+| XGBoost Anomaly Classifier | 0.99      | 0.98   | 0.98      | 0.98     |
+
+ Our GNN model struggles with false negatives, while our anomaly classifier detects almost all anomalies. However, the GNN model only raises an alarm when it is absolutely certain. The anomaly classifier is slightly less strict than our GNN. The imbalance in our GNN model between perfect precision and weak recall drags down its F1-score, so it trades caution for coverage. Our anomaly classifier is more balanced, showing strong precision and recall.
 
 ## **Troubleshooting**
 ### Notes about Ports
