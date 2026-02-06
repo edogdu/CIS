@@ -101,7 +101,7 @@ http://localhost:8050/
 
 <<<<<<< HEAD
 ## **Results**
-### Classification report for the standard GNN model (loss + sigmoid)
+### [Classification report for the standard GNN model (loss + sigmoid)](https://media.githubusercontent.com/media/edogdu/CIS/refs/heads/main/exports/results/classification_report_Final%20Test%20Set.csv?token=BE6VLLIZM6XETDNCTNP3WH3JQV3X4)
 |              | Precision | Recall   | F1-Score | Support  |
 | :----------: | :-------: | :------: | :------: | :------: |
 | 0            | 0.67      | 1.00     | 0.80     | 49.0     |
@@ -112,7 +112,7 @@ http://localhost:8050/
 
 The standard GNN with loss and sigmoid functions struggles to learn any pattern predicting nominal or anomalous behavior.
 
-### Classification report GNN-AE single model with XGBoost anomaly classifier
+### [Classification report GNN-AE single model with XGBoost anomaly classifier](https://github.com/edogdu/CIS/blob/main/exports/results/BAK/classification_report_classify_Final%20Test%20Set%20-%20GNNHeteroSingleModel.csv)
 | Class          | Precision | Recall   | F1-Score | Support  |
 | :------------: | :-------: | :------: | :------: | :------: |
 | normal         | 0.94      | 0.79     | 0.85     | 56.0     |
@@ -134,8 +134,6 @@ Our GNN-AE model correctly classifies most cases, but misses some anomalies.
 
  Our GNN model struggles with false negatives, while our anomaly classifier detects almost all anomalies. However, the GNN model only raises an alarm when it is absolutely certain. The anomaly classifier is slightly less strict than our GNN. The imbalance in our GNN model between perfect precision and weak recall drags down its F1-score, so it trades caution for coverage. Our anomaly classifier is more balanced, showing strong precision and recall.
 
-=======
->>>>>>> parent of 4bfefbe (Add large dataset files with Git LFS)
 ## **Troubleshooting**
 ### Notes about Ports
 * The following have had their ports mapped to non-standard ports to avoid collision with UCKG
