@@ -18,3 +18,9 @@ RETURN p,n,n2,ctr,ctr2, rf
 
 /* Clear The Database */
 MATCH (n) DETACH DELETE n
+
+
+MATCH (n)-[r]->(n2) WHERE type(r) IN ['ISSUES_COMMAND_TO', 'CONTROLS','HAS_ENDPOINT','FEEDS_THROUGH', 'FEEDS_TO','READS_FROM', 'SENSOR_ON'] 
+MATCH (n2)-[r2]-(n3) WHERE type(r2) IN ['TERMINATES_AT','INITIATES','HAS_MEASUREMENT']
+AND n3.snapshot_id = 'testbed_system_1_30s_2022-02-21 15:06:00+00:00'
+RETURN n,r,n2,r2,n3

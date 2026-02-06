@@ -46,7 +46,8 @@ class SnapshotRepository:
                         asset_id: a.asset_id,
                         snapshot_id: $snapshot_id,
                         measurement_type: $prop_key,
-                        duration: $duration                        
+                        duration: $duration,
+                        stddev_value: $stddev_value
                     })
                     ON CREATE SET m.avg_value = $avg_value,
                         m.min_value = $min_value,
@@ -60,10 +61,11 @@ class SnapshotRepository:
                     prop_key=record.prop_key,
                     bucket=record.bucket,
                     duration=record.duration,
-                    avg_value=record.avg_value,
-                    min_value=record.min_value,
-                    max_value=record.max_value,
-                    num_measurements=record.num_measurements
+                    avg_value=record.avg_value if record.avg_value != None else 0,
+                    min_value=record.min_value if record.min_value != None else 0,
+                    max_value=record.max_value if record.max_value != None else 0,
+                    num_measurements=record.num_measurements,
+                    stddev_value=record.stddev_value if record.stddev_value != None else 0
                 )
     async def add_scada_data_to_snapshot(snapshot_id: str, scada_data: list[ScadaAggregate]):
         neo4j = await DataFactory.get_neo4j_instance()
@@ -92,7 +94,21 @@ class SnapshotRepository:
                         destination_ip: $destination_ip,
                         destination_mac: $destination_mac,
                         source_port: $source_port,
-                        destination_port: $destination_port                        
+                        destination_port: $destination_port,
+                        tcp_cwr_count: $tcp_cwr_count,
+                        tcp_ece_count: $tcp_ece_count,
+                        tcp_urg_count: $tcp_urg_count,
+                        tcp_ack_count: $tcp_ack_count,
+                        tcp_psh_count: $tcp_psh_count,
+                        tcp_rst_count: $tcp_rst_count,
+                        tcp_syn_count: $tcp_syn_count,
+                        tcp_fin_count: $tcp_fin_count,
+                        tcp_syn_ratio: $tcp_syn_ratio,
+                        tcp_ack_ratio: $tcp_ack_ratio,
+                        modbus_response_count: $modbus_response_count,
+                        modbus_response_ratio: $modbus_response_ratio,
+                        avg_modbus_response_code: $avg_modbus_response_code,
+                        modbus_response_present: $modbus_response_present
                     })
                     ON CREATE SET conn.source_port = $source_port,
                         conn.destination_port = $destination_port,
@@ -109,17 +125,30 @@ class SnapshotRepository:
                     bucket=record.bucket,
                     duration=record.duration,
                     protocol=record.protocol,
-                    avg_size=record.avg_size,
+                    avg_size=record.avg_size if record.avg_size != None else 0,
                     source_total_packets=record.source_total_packets,
                     destination_total_packets=record.destination_total_packets,
-                    min_size=record.min_size,
-                    max_size=record.max_size,
+                    min_size=record.min_size if record.min_size != None else 0,
+                    max_size=record.max_size if record.max_size != None else 0,
                     num_connections=record.num_connections,
                     source_port=record.source_port if record.source_port != None else 0,
                     destination_port=record.destination_port if record.destination_port != None else 0,
                     source_key=record.source_key,
-                    destination_key=record.destination_key
-                    
+                    destination_key=record.destination_key,
+                    tcp_cwr_count=record.tcp_cwr_count,
+                    tcp_ece_count=record.tcp_ece_count,
+                    tcp_urg_count=record.tcp_urg_count,
+                    tcp_ack_count=record.tcp_ack_count,
+                    tcp_psh_count=record.tcp_psh_count,
+                    tcp_rst_count=record.tcp_rst_count,
+                    tcp_syn_count=record.tcp_syn_count,
+                    tcp_fin_count=record.tcp_fin_count,
+                    tcp_syn_ratio=record.tcp_syn_ratio,
+                    tcp_ack_ratio=record.tcp_ack_ratio,
+                    modbus_response_count=record.modbus_response_count,
+                    modbus_response_ratio=record.modbus_response_ratio,
+                    avg_modbus_response_code=record.avg_modbus_response_code,
+                    modbus_response_present=record.modbus_response_present
                 )
     async def get_snapshot(snapshot_id: str):
         neo4j = await DataFactory.get_neo4j_instance()
@@ -190,10 +219,173 @@ class SnapshotRepository:
             else:
                 return None
             
+    async def get_all_snapshots_scada_only(duration:int, system_id: str):
+        neo4j = await DataFactory.get_neo4j_instance()
+        async with neo4j.session() as session:            
+            snapshots = []
+            results = await session.run(
+                """
+                // Fetch all snapshots for the given system_id and duration
+                MATCH (s:Snapshot {system_id: $system_id, duration: $duration})
+                
+                CALL{      
+                    // For each snapshot, find all contained Connections and Measurements
+                    WITH s
+                    MATCH (s)-[:CONTAINS]->(item:Connection)
+
+                    // Find directly connected Endpoints and Assets
+                    OPTIONAL MATCH (item)-[r1]-(r1_node)
+                    WHERE r1_node:Endpoint OR r1_node:Asset
+
+                    // Find second-level connections to connect our graph more fully
+                    WITH s, item, r1, r1_node
+                    OPTIONAL MATCH (r1_node)-[r2]-(r2_node)
+                    WHERE r1_node:Asset AND (r2_node:Endpoint OR r2_node:Asset)
+
+                    // Collect all unique nodes and relationships
+                    WITH s,
+                    collect(DISTINCT item) + collect(DISTINCT r1_node) + collect(DISTINCT r2_node) as temp_all_nodes,
+                    collect(DISTINCT r1) + collect(DISTINCT r2) as temp_rels
+
+                    // Remove duplicates and NULLS
+                    WITH s,
+                    [n IN temp_all_nodes WHERE n IS NOT NULL] AS all_nodes,
+                    [r IN temp_rels WHERE r IS NOT NULL] AS rels
+
+                    RETURN {
+                        snapshot_id: s.snapshot_id,
+                        start_time: s.start_time,
+                        nodes: [node IN all_nodes | {
+                            id: id(node),
+                            labels: labels(node),
+                            properties: apoc.map.removeKeys(properties(node), ['snapshot_id', 'system_id'])
+                        }],
+                        relationships: [rel IN rels | {
+                            type: type(rel),
+                            source: id(startNode(rel)),
+                            target: id(endNode(rel)),
+                            properties: properties(rel)
+                        }]
+                    } AS snapshot
+                }
+                RETURN collect(snapshot) AS snapshots
+                """,
+                duration=duration,
+                system_id=system_id
+            )
+            record = await results.single()
+            if record:
+                snapshots = record["snapshots"]
+            logger.info(f"Fetched {len(snapshots)} snapshots.")
+            with open(f"./exports/data/Graphs/all_snapshots_{duration}s.json", "w") as f:
+                import json
+                json.dump(snapshots, f, default=str, indent=4)
+            return snapshots
+
+    async def get_all_snapshots_phys_only(duration:int, system_id: str):
+        neo4j = await DataFactory.get_neo4j_instance()
+        async with neo4j.session() as session:            
+            snapshots = []
+            results = await session.run(
+                """
+                // Fetch all snapshots for the given system_id and duration
+                MATCH (s:Snapshot {system_id: $system_id, duration: $duration})
+                
+                CALL{      
+                    // For each snapshot, find all contained Connections and Measurements
+                    WITH s
+                    MATCH (s)-[:CONTAINS]->(item:Measurement)
+
+                    // Find directly connected Endpoints and Assets
+                    OPTIONAL MATCH (item)-[r1]-(r1_node)
+                    WHERE r1_node:Endpoint OR r1_node:Asset
+
+                    // Find second-level connections to connect our graph more fully
+                    WITH s, item, r1, r1_node
+                    OPTIONAL MATCH (r1_node)-[r2]-(r2_node)
+                    WHERE r1_node:Asset AND (r2_node:Endpoint OR r2_node:Asset)
+
+                    // Collect all unique nodes and relationships
+                    WITH s,
+                    collect(DISTINCT item) + collect(DISTINCT r1_node) + collect(DISTINCT r2_node) as temp_all_nodes,
+                    collect(DISTINCT r1) + collect(DISTINCT r2) as temp_rels
+
+                    // Remove duplicates and NULLS
+                    WITH s,
+                    [n IN temp_all_nodes WHERE n IS NOT NULL] AS all_nodes,
+                    [r IN temp_rels WHERE r IS NOT NULL] AS rels
+
+                    RETURN {
+                        snapshot_id: s.snapshot_id,
+                        start_time: s.start_time,
+                        nodes: [node IN all_nodes | {
+                            id: id(node),
+                            labels: labels(node),
+                            properties: apoc.map.removeKeys(properties(node), ['snapshot_id', 'system_id'])
+                        }],
+                        relationships: [rel IN rels | {
+                            type: type(rel),
+                            source: id(startNode(rel)),
+                            target: id(endNode(rel)),
+                            properties: properties(rel)
+                        }]
+                    } AS snapshot
+                }
+                RETURN collect(snapshot) AS snapshots
+                """,
+                duration=duration,
+                system_id=system_id
+            )
+            record = await results.single()
+            if record:
+                snapshots = record["snapshots"]
+            logger.info(f"Fetched {len(snapshots)} snapshots.")
+            with open(f"./exports/data/Graphs/all_snapshots_phys_{duration}s.json", "w") as f:
+                import json
+                json.dump(snapshots, f, default=str, indent=4)
+            return snapshots
+
     async def get_all_snapshots(duration:int, system_id: str):
         neo4j = await DataFactory.get_neo4j_instance()
         async with neo4j.session() as session:            
             snapshots = []
+#             results = await session.run(
+#                 """
+# MATCH (s:Snapshot{system_id: $system_id, duration: $duration})
+
+# CALL{
+# WITH s.snapshot_id AS sid
+# MATCH (n)-[r]-(n2) WHERE type(r) IN ['ISSUES_COMMAND_TO', 'CONTROLS','HAS_ENDPOINT','FEEDS_THROUGH', 'FEEDS_TO','READS_FROM', 'SENSOR_ON'] 
+# MATCH (n2)-[r2]-(n3) WHERE type(r2) IN ['TERMINATES_AT','INITIATES','HAS_MEASUREMENT']
+# AND n3.snapshot_id = sid
+
+# WITH sid,
+# collect(DISTINCT n) + collect(DISTINCT n2) + collect(DISTINCT n3) as temp_all_nodes,
+# collect(DISTINCT r) + collect(DISTINCT r2) as temp_rels
+
+# WITH sid,
+# [n IN temp_all_nodes WHERE n IS NOT NULL] AS all_nodes,
+# [r IN temp_rels WHERE r IS NOT NULL] AS rels
+
+# RETURN {
+#     snapshot_id: sid,
+#     nodes: [node IN all_nodes | {
+#         id: id(node),
+#         labels: labels(node),
+#         properties: apoc.map.removeKeys(properties(node), ['snapshot_id', 'system_id'])
+#     }],
+#     relationships: [rel IN rels | {
+#         type: type(rel),
+#         source: id(startNode(rel)),
+#         target: id(endNode(rel)),
+#         properties: properties(rel)
+#     }]
+# } AS snapshot
+# }
+# RETURN collect(snapshot) AS snapshots
+# """,                duration=duration,
+#                 system_id=system_id
+#             )
             results = await session.run(
                 """
                 // Fetch all snapshots for the given system_id and duration
