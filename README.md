@@ -18,17 +18,17 @@ $  cd CIS
 ### **Base Application Startup**
 Base application startup is a requirement for each of the other modules.  This should be started first, everytime.
 ```bash
-$ docker-compose up -d cis-kafka cis-neo4j cis-timescaledb cis-test-data-loader
+$ docker compose up -d cis-kafka cis-neo4j cis-timescaledb cis-test-data-loader
 ```
 
 ### **Initial Setup**
 Run these once for initial data load. Base Application should be up first.
 ```bash
-$ docker-compose up -d cis-init-timescaledb
+$ docker compose up -d cis-init-timescaledb
 
-$ docker-compose up -d cis-spark-master cis-spark-worker cis-kafka-init-topics cis-raw-network-consumer cis-raw-physical-consumer cis-data-error-consumer
+$ docker compose up -d cis-spark-master cis-spark-worker cis-kafka-init-topics cis-raw-network-consumer cis-raw-physical-consumer cis-data-error-consumer
 
-$ docker-compose up -d cis-load-bigdata
+$ docker compose up -d cis-load-bigdata
 ```
 ### **Test Data Loader FastAPI**
 The remaining sections utilize a FastAPI test harness to act as a trigger for various events.  With the Base Application started, you can view the full list of available functions and expected payloads here:
@@ -45,7 +45,7 @@ http://localhost:8090/refresh_materialized_views
 ### **Generate Graphs**
 Ensure the following Docker containers are started and ready
 ```bash
-$ docker-compose up -d cis-graph-generator-consumer
+$ docker compose up -d cis-graph-generator-consumer
 ```
 
 Perform Http POST to the following url:
@@ -93,7 +93,7 @@ http://localhost:8090/train_gnn_model
 ### **UI Dashboard**
 Ensure the following Docker containers are started and ready
 ```bash
-$ docker-compose up -d cis-dashboard-app
+$ docker compose up -d cis-dashboard-app
 ```
 Navigate to the following URL:
 
