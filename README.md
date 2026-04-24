@@ -64,7 +64,7 @@ http://localhost:8090/generate_graph
 ### **Train Models**
 Ensure the following Docker container is started and ready
 ```bash
-$ docker-compose up -d cis-anomaly-detector-consumer
+$ docker compose up -d cis-anomaly-detector-consumer
 ```
 
 Perform Http POST to the following url:
