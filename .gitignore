@@ -21,3 +21,6 @@ __pycache__/
 !.gitkeep
 *.log
 ragAnythingSecrets.json
+
+# Unzipped data folder (stored as zip to avoid LFS)
+data/testbed_system_1/
