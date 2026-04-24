@@ -1,4 +1,4 @@
-import os, glob
+import os, glob, zipfile
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
     StructType, StructField, StringType, IntegerType, DoubleType, TimestampType, BooleanType
@@ -211,10 +211,20 @@ def send_to_kafka(df, topic):
 #                     fdest.write(line)
         
 
+def unzip_data():
+    zip_path = "/data/testbed_system_1.zip"
+    extract_dir = "/data"
+    if not os.path.isdir("/data/testbed_system_1") and os.path.isfile(zip_path):
+        print(f"Extracting {zip_path} to {extract_dir}...")
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(extract_dir)
+        print("Extraction complete.")
+
 if __name__ == "__main__":
+    unzip_data()
     spark = SparkSession.builder.appName("CISBulkDataLoader").getOrCreate()
     try:
-        #physical       
+        #physical
         phys_df_utf8 = spark.read.options(delimiter="\t", header=True, schema=phys_data_schema, nullValue="NaN", encoding="UTF-8").csv(f"{phys_data_path}/phy_*.csv")
         final_utf8phys_df = preprocess_phys_data(phys_df_utf8)
         #print(f"final_utf8phys_df: {final_utf8phys_df.take(100)}")
