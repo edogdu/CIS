@@ -44,6 +44,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.preprocessing import RobustScaler
 
+# import moved file
+from models.encoders.hetero_encoder import GNNHeteroEncoderModel
+
 # Local application/library specific imports
 
 
