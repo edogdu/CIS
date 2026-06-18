@@ -37,6 +37,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import json
 
+# after moving files, import
+from models.encoders.hetero_encoder import GNNHeteroEncoderModel
+
 # Local application/library specific imports
 
 
