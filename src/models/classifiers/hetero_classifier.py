@@ -1,3 +1,7 @@
+from models.encoders.hetero_encoder import (
+    GNNHeteroEncoderModel
+)
+
 class GNNHeteroClassifierModel(nn.Module):
     """GNN model for anomaly detection.  It is supervised model,
     which classifies each graph as normal, MITM, DoS, scan, physical fault, anomaly
