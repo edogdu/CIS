@@ -1,4 +1,6 @@
-    def get_criterion(self, data_loader: DataLoader) -> nn.Module:
+from models.training.losses import FocalLoss
+
+def get_criterion(self, data_loader: DataLoader) -> nn.Module:
         """Get loss function with class weights to handle class imbalance."""
         
         # Gather all labels from the dataset
