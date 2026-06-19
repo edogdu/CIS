@@ -1,4 +1,5 @@
 # captum_explainer.py
+# only place that should contain _fast_model_forward_wrapper, IntegratedGradients, and attribution logic
 
 # imports
 import logging
