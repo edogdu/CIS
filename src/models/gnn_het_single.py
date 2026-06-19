@@ -45,6 +45,7 @@ from sklearn.preprocessing import RobustScaler
 
 # import moved file
 from models.encoders.hetero_encoder import GNNHeteroEncoderModel
+from src.xai import captum_explainer.py
 
 # Local application/library specific imports
 
