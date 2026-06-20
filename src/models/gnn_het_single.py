@@ -1,3 +1,6 @@
+# Custom imports
+from models.encoders.hetero_encoder import GNNHeteroEncoderModel
+
 # Standard library imports
 from datetime import datetime
 import logging
