@@ -30,7 +30,6 @@ from torch_geometric.nn import (
 )
 from models.focal_loss import FocalLoss
 import copy
-from captum.attr import IntegratedGradients, Saliency, DeepLift
 from functools import partial
 from repositories.graphs.pyg_builder import y_labels, get_hetero_column_names
 import matplotlib.pyplot as plt
@@ -41,8 +40,6 @@ import json
 from models.encoders.hetero_encoder import GNNHeteroEncoderModel
 
 # Local application/library specific imports
-
-
 logging.info("Imported y_labels in gnn_het.py: %s", y_labels)
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -57,72 +54,6 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 seed = 42
 torch.manual_seed(seed)
 np.random.seed(seed)
-
-def _fast_model_forward_wrapper(model: nn.Module, data: HeteroData, model_device: str, *node_inputs: torch.Tensor):
-    """
-    Optimized wrapper for Captum. Reconstructs the batched graph from interpolated inputs.
-    """
-    # Create a lightweight container
-    temp_data = HeteroData()
-    
-    # Identify node types with features
-    node_types_with_features = [ntype for ntype in data.x_dict.keys() 
-                                if data[ntype].num_nodes > 0 and hasattr(data[ntype], "x")]
-    
-    # Determine Batching Params
-    first_input = node_inputs[0]
-    original_num_nodes = data[node_types_with_features[0]].num_nodes
-    total_nodes = first_input.size(0)
-    
-    is_batched = total_nodes != original_num_nodes
-    num_replications = total_nodes // original_num_nodes if is_batched else 1
-    
-    
-    temp_data.num_graphs = num_replications
-    
-
-    # Reconstruct Node Features & Batch Vector
-    for idx, ntype in enumerate(node_types_with_features):
-        temp_data[ntype].x = node_inputs[idx]
-        
-        if is_batched:
-            current_num_nodes = data[ntype].num_nodes
-            # Create batch vector [0,0... 1,1...]
-            batch_ids = torch.arange(num_replications, device=model_device)
-            temp_data[ntype].batch = torch.repeat_interleave(batch_ids, current_num_nodes)
-        else:
-            temp_data[ntype].batch = torch.zeros(data[ntype].num_nodes, dtype=torch.long, device=model_device)
-
-    # Reconstruct Edges (Vectorized)
-    if not is_batched:
-        temp_data.edge_index_dict = data.edge_index_dict
-    else:
-        new_edge_index_dict = {}
-        for etype, edge_index in data.edge_index_dict.items():
-            # Standard edge replication logic
-            num_edges = edge_index.size(1)
-            src_ntype, _, dst_ntype = etype
-            src_count = data[src_ntype].num_nodes
-            dst_count = data[dst_ntype].num_nodes
-            
-            # Create offsets
-            offsets_src = (torch.arange(num_replications, device=model_device) * src_count).view(-1, 1)
-            offsets_dst = (torch.arange(num_replications, device=model_device) * dst_count).view(-1, 1)
-            
-            # Expand edges [2, num_edges] -> [num_reps, 2, num_edges]
-            edges_expanded = edge_index.unsqueeze(0).expand(num_replications, 2, num_edges).clone()
-            
-            # Add offsets
-            edges_expanded[:, 0, :] += offsets_src
-            edges_expanded[:, 1, :] += offsets_dst
-            
-            # Flatten to [2, total_edges]
-            new_edge_index_dict[etype] = edges_expanded.permute(1, 0, 2).reshape(2, -1)
-            
-        temp_data.edge_index_dict = new_edge_index_dict
-
-    # Run Model
-    return model(temp_data)
 
 class GNNHeteroEncoderModel(nn.Module):
     """GNN module to produce node embeddings for heterogeneous graphs."""
@@ -483,73 +414,6 @@ class GNNHeteroClassifierModel(nn.Module):
         
         return weights
     
-    def explain_with_captum(self, data: HeteroData, save_dir="./exports/explanations"):
-        """
-        Generates explanations with Snapshot ID, True/Pred Y, and Global Feature Plots.
-        """
-        self.eval()
-        os.makedirs(save_dir, exist_ok=True)
-        timestamp = int(time.time())
-
-        # Extract Metadata (Snapshot, True Y, etc.)
-        # Handle Snapshot ID (support string, int, or tensor)
-        snapshot_id = "unknown"
-        if hasattr(data, 'snapshot_id'):
-            s_id = data.snapshot_id
-            if torch.is_tensor(s_id):
-                snapshot_id = str(s_id.item()) if s_id.numel() == 1 else str(s_id.tolist())
-            else:
-                snapshot_id = str(s_id)
-        
-        # Handle True Label
-        true_label_idx = data.y.item() if hasattr(data, 'y') and data.y.numel() == 1 else -1
-        true_label_name = y_labels[true_label_idx] if 0 <= true_label_idx < len(y_labels) else "Unknown"
-
-        # Get Model Prediction
-        data = data.to(DEVICE)
-        batch = Batch.from_data_list([data]).to(DEVICE)
-        
-        with torch.no_grad():
-            logits = self(batch)
-            pred_class = logits.argmax(dim=1).item()
-            pred_prob = F.softmax(logits, dim=1).max().item()
-            pred_label_name = y_labels[pred_class]
-
-        # Filter: Only explain anomalies (Optional: remove if you want to explain everything)
-        if pred_class == 0:
-            logging.info(f"Skipping explanation for Normal traffic (Snapshot: {snapshot_id}).")
-            return None
-
-        logging.info(f"Explaining Snapshot {snapshot_id}: True: {true_label_name} -> Pred: {pred_label_name} ({pred_prob:.4f})")
-
-        # Prepare Inputs for Captum
-        inputs_list = []
-        node_types = []
-        for ntype in data.x_dict.keys():
-            if data[ntype].num_nodes > 0 and hasattr(data[ntype], "x"):
-                inputs_list.append(data[ntype].x.clone().detach().requires_grad_(True))
-                node_types.append(ntype)
-
-        inputs_tuple = tuple(inputs_list)
-        baselines_tuple = tuple(torch.zeros_like(t) for t in inputs_tuple)
-
-        # Run Attribution
-        # Uses the static wrapper defined previously
-        forward_func = partial(_fast_model_forward_wrapper, self, data, DEVICE)
-        ig = IntegratedGradients(forward_func=forward_func)
-
-        try:
-            attributions = ig.attribute(
-                inputs=inputs_tuple,
-                baselines=baselines_tuple,
-                target=pred_class,
-                n_steps=50,
-                internal_batch_size=10
-            )
-        except Exception as e:
-            logging.error(f"Error during IG attribution for Snapshot {snapshot_id}: {e}")
-            return None
-
         # Process Results ---
         explanation_data = {
             "meta": {
