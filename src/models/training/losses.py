@@ -1,35 +1,40 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+from models.training.focal_loss import FocalLoss     
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-class FocalLoss(nn.Module):
-    def __init__(self, alpha: torch.Tensor, gamma: float = 2.0, reduction: str = 'mean', device: str = DEVICE):
-        super(FocalLoss, self).__init__()        
-        self.gamma = gamma
-        self.reduction = reduction
-        self.to(device)
-        if(alpha is None):
-            self.register_buffer('alpha', None)
-        else:
-            self.register_buffer('alpha', torch.tensor(alpha, dtype=torch.float, device=device))
-
-    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """Compute focal loss for multi-class classification."""
-        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
-        pt = torch.exp(-ce_loss)  # Probabilities of the true class
+    def get_criterion(self, data_loader: DataLoader) -> nn.Module:
+        """Get loss function with class weights to handle class imbalance."""
         
-        ce_loss_clamped = ce_loss.clamp(min=1e-8, max=100.0)
+        # Gather all labels from the dataset
+        labels = []
+        for batch in data_loader:
+            logging.info("Processing batch with %d graphs for criterion calculation.", batch.num_graphs)
+            logging.info("Batch labels: %s", batch.y.view(-1).long().cpu().numpy().tolist())
+            # Map labels to their corresponding anomaly classes, offset by -1 for CrossEntropyLoss
+            labels.extend(batch.y.view(-1).long().cpu().numpy().tolist())
         
-        focal_loss = ((1 - pt) ** self.gamma) * ce_loss_clamped
-        if self.alpha is not None:
-            alpha_t = self.alpha.gather(0, targets)
-            focal_loss = alpha_t * focal_loss
+        weights = self.get_weights(labels, min_num_classes=len(y_labels))
+        logging.info("Anomaly Classifier Class Weights: %s", weights)
+        anom_criterion = nn.CrossEntropyLoss(weight=torch.tensor(weights, dtype=torch.float, device=DEVICE))
+        self.criterion = anom_criterion
+        return anom_criterion
 
-        if self.reduction == 'mean':
-            return focal_loss.mean()
-        elif self.reduction == 'sum':
-            return focal_loss.sum()
-        else:
-            return focal_loss
+        #['normal', 'anomaly', 'scan', 'dos', 'mitm', 'physical fault']
+        
+        # logging.info("Anomaly Classifier Class Weights: %s", weights)
+        # anom_criterion = FocalLoss(alpha=weights, gamma=2.0, reduction='mean')
+        # self.criterion = anom_criterion
+        # return anom_criterion
+      
+    # Training and evaluation functions
+
+    # Helper functions for training and evaluation
+    def get_weights(self, labels, min_num_classes, epsilon=1e-6):
+        """Compute class weights to handle class imbalance."""
+        counts = np.bincount(labels, minlength=min_num_classes).astype(np.float32)
+        counts[counts == 0] = epsilon  # avoid division by zero
+        weights = 1.0 / counts
+        weights = weights / np.sum(weights) * len(counts)  # normalize
+        weights[~np.isfinite(weights)] = epsilon  # handle any inf or nan
+        
+        
+        
+        return weights   
