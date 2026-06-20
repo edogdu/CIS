@@ -9,15 +9,17 @@ from xai import XAIExplainer
 
 from .captum_explainer import CaptumExplainer
 from .node_explainer import NodeExplainer
-from .graph_context import GraphContextExtractor
+from .feature_ranker import FeatureRanker
+from .graph_context import GraphContext
 from .recommendation_engine import RecommendationEngine
 from .report_generator import ReportGenerator
 
 __all__ = [
     "XAIExplainer",
     "CaptumExplainer",
+    "FeatureRanker",
     "NodeExplainer",
-    "GraphContextExtractor",
+    "GraphContext",
     "RecommendationEngine",
     "ReportGenerator",
 ]
