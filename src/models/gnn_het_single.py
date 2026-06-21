@@ -65,42 +65,6 @@ seed = 42
 torch.manual_seed(seed)
 np.random.seed(seed)
 
-class GNNHeteroEncoderModel(nn.Module):
-    """GNN module to produce node embeddings for heterogeneous graphs."""
-    def __init__(self, config: Dict[str, Any], metadata=None):
-        super(GNNHeteroEncoderModel, self).__init__()
-        if metadata is None:
-            raise ValueError("Metadata must be provided for heterogeneous graphs.")
-        self.metadata = metadata
-        self.config = config
-        
-
-        hd    = config.get("hidden_dim", 32)
-        heads = config.get("num_heads", 4)
-
-        # Which node types to pool over (you can override via config)
-        self.pooled_types: List[str] = config.get("pooled_types", ["Pumps", "FlowSensors", "Tanks", "Valves", "Connections", "Endpoints"])
-
-        # Per-node-type input projection to a shared hidden dim
-        self.lin_dict = nn.ModuleDict()
-        for node_type in self.metadata[0]:
-            self.lin_dict[node_type] = Linear(-1, hd)
-
-        # HGT backbone
-        self.num_layers = config.get("num_layers", 3)
-
-        self.convs = nn.ModuleList()
-        for _ in range(self.num_layers):
-            self.convs.append(HGTConv(hd, hd, metadata=self.metadata, heads=heads))
-
-        self.dropout = float(config.get("dropout", 0.5))
-        
-        # Projection after concatenating pooled node-type embeddings
-        pooled_width = hd * max(1, len(self.pooled_types))
-        self.lin1 = Linear(pooled_width, hd)
-
-        self.to(DEVICE)
-
 
     def forward(self, data: HeteroData) -> Dict[str, torch.Tensor]:
         # 1) Type-wise input projections
