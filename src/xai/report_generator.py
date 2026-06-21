@@ -1,3 +1,7 @@
+class ExplanationReportGenerator:
+
+  # make methods: generate_json, save_json, save_node_rankings, and save_feature_plot
+
 # Step 5 - Report Generator
 {
   "stage1": "anomaly",
