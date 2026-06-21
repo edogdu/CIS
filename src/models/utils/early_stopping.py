@@ -80,4 +80,3 @@ class GNNEarlyStopping:
             if self.counter >= self.patience:
                 self.early_stop = True
                     
-        return self.early_stop 
