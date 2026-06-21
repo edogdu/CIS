@@ -1,3 +1,6 @@
+# model should only know about: forward(), predict(), train(), evaluate(), save(), load()
+# XAI modules handle explanations
+
 import copy
 import logging
 import os
@@ -69,7 +72,16 @@ class GNNHeteroClassifierModel(nn.Module):
             len(y_labels)
         )
 
-        self.explainer = CaptumExplainer(self)
+        explainer = CaptumExplainer(model)
+        
+        result = explainer.explain(graph)
+        
+        report = ExplanationReportGenerator()
+        
+        report.generate(
+            graph,
+            result,
+        )
 
         self.to(DEVICE)
 
