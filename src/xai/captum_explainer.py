@@ -26,6 +26,11 @@ seed = 42
 torch.manual_seed(seed)
 np.random.seed(seed)
 
+explainer = CaptumExplainer(model)
+
+for graph in anomaly_graphs:
+    explanation = explainer.explain(graph)
+    
 # wrapper function
 def _fast_model_forward_wrapper(model: nn.Module, data: HeteroData, model_device: str, *node_inputs: torch.Tensor):
     """
