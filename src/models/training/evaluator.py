@@ -2,7 +2,7 @@ from models.encoders.hetero_encoder import (
     GNNTrainer
 )
 
-class Evaluator(nn.Module):
+class GNNEvaluator(nn.Module):
 
     @torch.no_grad()
     def evaluate_model(self, loader: DataLoader):
