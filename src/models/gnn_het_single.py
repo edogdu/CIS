@@ -66,37 +66,6 @@ torch.manual_seed(seed)
 np.random.seed(seed)
 
 
-    def forward(self, data: HeteroData) -> Dict[str, torch.Tensor]:
-        # 1) Type-wise input projections
-        
-        x_dict = {
-            ntype: self.lin_dict[ntype](x).relu()
-            for ntype, x in data.x_dict.items()
-        }
-
-        # 2) HGT layers
-        for conv in self.convs:
-            x_dict = conv(x_dict, data.edge_index_dict)
-            x_dict = {k: F.relu(v) for k, v in x_dict.items()}
-
-        # 3) Graph-level pooling over selected node types (robust if missing)
-        pools = []
-        num_graphs = data.num_graphs
-        for ntype in self.pooled_types:
-            if ntype in x_dict and hasattr(data[ntype], "batch"):
-                pools.append(global_max_pool(x_dict[ntype], data[ntype].batch, size=num_graphs))
-            else:
-                # keep dims aligned so concatenation works
-                pools.append(torch.zeros((num_graphs, self.config.get("hidden_dim", 32)), device=x_dict[next(iter(x_dict))].device))
-
-        h = torch.cat(pools, dim=1) if len(pools) > 1 else pools[0]
-
-        # 4) Final MLP + Dropout
-        h = F.relu(self.lin1(F.dropout(h, p=self.dropout, training=self.training)))
-        h = F.dropout(h, p=self.dropout, training=self.training)
-
-        return h
-
 class GNNHeteroClassifierModel(nn.Module):
     """GNN model for anomaly detection.  It is supervised model,
     which classifies each graph as normal, MITM, DoS, scan, physical fault, anomaly
