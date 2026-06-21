@@ -3,21 +3,27 @@
 
 # imports
 import logging
-from functools import partial
-from typing import Dict, Any
+import json
+import os
+import time
 
+from functools import partial
+from typing import Any, Dict
+
+import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
+import seaborn as sns
 import torch
 import torch.nn as nn
-from torch_geometric.data import HeteroData
-
-from torch_geometric.explain import Explainer, GNNExplainer, HeteroExplanation
-import matplotlib.pyplot as plt
-import seaborn as sns
-import json
-from functools import partial
 
 from captum.attr import IntegratedGradients
+from torch_geometric.data import Batch, HeteroData
+
+from repositories.graphs.pyg_builder import (
+    get_hetero_column_names,
+    y_labels,
+)
 
 # logging information
 logging.info("Imported y_labels in gnn_het.py: %s", y_labels)
@@ -27,15 +33,73 @@ seed = 42
 torch.manual_seed(seed)
 np.random.seed(seed)
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-seed = 42
-torch.manual_seed(seed)
-np.random.seed(seed)
+class CaptumExplainer(BaseExplainer):
+    def __init__(
+        self,
+        model: nn.Module,
+        feature_names: Dict[str, list[str]],
+        device: str = DEVICE,
+    ):
+        self.model = model
+        self.feature_names = feature_names
+        self.device = device
+        self.model.to(device)
+        self.model.eval()
 
-explainer = CaptumExplainer(model)
+    def explain(
+        self,
+        data: HeteroData,
+        target_class: int = None,
+        snapshot_id: str = None,
+    ) -> Dict[str, Any]:
 
-for graph in anomaly_graphs:
-    explanation = explainer.explain(graph)
+        data = data.to(self.device)
+
+        inputs = tuple(
+            data[ntype].x
+            for ntype in data.x_dict
+            if hasattr(data[ntype], "x")
+        )
+
+        baselines = tuple(torch.zeros_like(x) for x in inputs)
+
+        with torch.no_grad():
+            logits = self.model(data)
+
+            if target_class is None:
+                target_class = logits.argmax(dim=1).item()
+
+            probs = torch.softmax(logits, dim=1)
+            confidence = probs[0, target_class].item()
+
+        forward_func = partial(
+            fast_model_forward_wrapper,
+            self.model,
+            data,
+            self.device,
+        )
+
+        ig = IntegratedGradients(forward_func)
+
+        attributions = ig.attribute(
+            inputs=inputs,
+            baselines=baselines,
+            target=target_class,
+            n_steps=50,
+            internal_batch_size=10,
+        )
+
+        return {
+            "target_class": target_class,
+            "confidence": confidence,
+            "attributions": attributions,
+        }
+        
+
+
+
+
+ 
     
 # wrapper function
 def _fast_model_forward_wrapper(model: nn.Module, data: HeteroData, model_device: str, *node_inputs: torch.Tensor):
@@ -263,38 +327,6 @@ class CaptumExplainer:
             
         logging.info(f"Saved explanations and plot for snapshot {snapshot_id} to {save_dir}")
         return explanation_data       
-
-class GNNEarlyStopping:
-    """Early stopping utility to stop training when 
-    macro F1 score across all anomaly classes does not improve.
-    We ignore the normal class (class 0) for early stopping as it is over-represented.    
-    """
-    def __init__(self, patience: int = 5, min_delta: float = 0.0001, mode: str = 'max'):
-        self.patience = patience
-        self.min_delta = min_delta
-        self.counter = 0
-        self.best_score = None
-        self.early_stop = False
-        self.mode = mode
-    
-    def step(self, val: float):
-        if self.best_score is None:
-            self.best_score = val
-        elif self.mode == 'max' and val > self.best_score + self.min_delta:
-            self.best_score = val
-            self.counter = 0
-        elif self.mode == 'min' and val < self.best_score - self.min_delta:
-            self.best_score = val
-            self.counter = 0
-        # elif val == 0.0:
-        #     # special case to avoid early stopping at beginning
-        #     pass
-        else:
-            self.counter += 1
-            if self.counter >= self.patience:
-                self.early_stop = True
-                    
-        return self.early_stop
 
 # explanation method
     def explain_with_captum(self, data: HeteroData, save_dir="./exports/explanations"):
