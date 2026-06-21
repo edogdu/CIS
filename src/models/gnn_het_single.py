@@ -76,28 +76,6 @@ np.random.seed(seed)
         anom_logits = self(batch)      # [B,5]
         pred = anom_logits.argmax(dim=1)
         return pred.detach().cpu().tolist()
-
-    def fit_model(self, 
-                train_loader: DataLoader,  
-                val_loader: DataLoader,
-                config: Dict[str, Any]):
-        """Train the GNN model with early stopping based on validation anomaly macro F1 score."""
-        num_epochs = config.get("max_epochs", 100)
-        learning_rate = config.get("learning_rate", 0.001)
-        patience = config.get("early_stopping_patience", 10)
-        min_delta = config.get("early_stopping_min_delta", 0.0001)
-        weight_decay = config.get("weight_decay", 1e-5)
-
-        criterion = self.get_criterion(train_loader)
-        optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate, weight_decay=weight_decay)
-
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, factor=0.5, patience=10,min_lr=1e-6)
-        early_stop_mode = 'min'  # We want to maximize F1 score
-        early_stopper = GNNEarlyStopping(patience=patience, min_delta=min_delta, mode=early_stop_mode)
-        best_val_metrics = None
-        best_model_state = None
-        early_stop_metric = 'loss'
         
         
 
