@@ -1,6 +1,9 @@
 from models.encoders.hetero_encoder import (
-    GNNEvaluator
+    GNNEvaluator,
+    GNNExplainer
 )
+
+from xai import captum_explainer
 
 class GNNTester(nn.Module):
 
