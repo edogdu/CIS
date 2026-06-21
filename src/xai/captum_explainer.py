@@ -11,6 +11,12 @@ import torch
 import torch.nn as nn
 from torch_geometric.data import HeteroData
 
+from torch_geometric.explain import Explainer, GNNExplainer, HeteroExplanation
+import matplotlib.pyplot as plt
+import seaborn as sns
+import json
+from functools import partial
+
 from captum.attr import IntegratedGradients
 
 # logging information
