@@ -1,6 +1,11 @@
-# xai/node_explainer.py
+# node_imp = attr_tensor.abs().sum(dim=1)
 
-#class NodeExplainer(XAIExplainer):
+class NodeExplainer:
 
-    #def explain(self, model, graph):
-        #...
+    @staticmethod
+    def rank_nodes(
+        data,
+        ntype,
+        attr_tensor,
+    ):
+        ...
