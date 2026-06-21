@@ -65,49 +65,6 @@ seed = 42
 torch.manual_seed(seed)
 np.random.seed(seed)
     
-        
-
-    @torch.no_grad()
-    def predict(self, data: HeteroData) -> List[int]:
-        """Predict anomaly classes for the given data HeteroData."""
-        self.eval()
-        data = data.to(DEVICE)
-        batch = Batch.from_data_list([data]).to(DEVICE)
-        anom_logits = self(batch)      # [B,5]
-        pred = anom_logits.argmax(dim=1)
-        return pred.detach().cpu().tolist()
-        
-        
-
-        
-        for epoch in range(num_epochs):
-            train_metrics = self.train_epoch(train_loader, optimizer)
-            val_metrics = self.evaluate_model(val_loader)
-            logging.info("Stage 2 Epoch %d: stop_score: %.4f Train Loss: %.4f, Val Loss: %.4f, f1 Score: %.4f, anomaly f1 Score: %.4f, binary f1 Score: %.4f",
-                        epoch+1, val_metrics[early_stop_metric], train_metrics["loss"], val_metrics["loss"], val_metrics["f1_score"], val_metrics["anomaly_f1_score"], val_metrics["binary_f1_score"])
-            
-            scheduler.step(val_metrics[early_stop_metric])
-            # Check for early stopping
-            if best_val_metrics is None or (early_stop_mode == 'max' and val_metrics[early_stop_metric] > best_val_metrics[early_stop_metric]) or (early_stop_mode == 'min' and val_metrics[early_stop_metric] < best_val_metrics[early_stop_metric]):
-                best_val_metrics = val_metrics
-                best_model_state = self.state_dict()
-                logging.info("New best model found at epoch %d with F1 Score: %.4f", epoch, val_metrics[early_stop_metric])
-
-            early_stopper.step(val_metrics[early_stop_metric])
-            if early_stopper.early_stop:
-                logging.info("Early stopping triggered at epoch %d during Stage 2.", epoch+1)
-                break
-        # Load best model state
-        if best_model_state is not None:
-            self.load_state_dict(best_model_state)
-
-        # Calculate final training metrics
-        final_train_metrics = self.evaluate_model(train_loader)
-        logging.info("Final Training Metrics - Loss: %.4f, F1: %.4f, Recall: %.4f, Precision: %.4f, Balanced Acc: %.4f, Accuracy: %.4f",
-                    final_train_metrics["loss"], final_train_metrics["f1_score"], final_train_metrics["recall"],
-                    final_train_metrics["precision"], final_train_metrics["balanced_accuracy"], final_train_metrics["accuracy"])
-
-        return self, criterion, final_train_metrics
 
     def test_model(self, test_loader: DataLoader, test_description: str="Final Test Set"):
         """Evaluate the trained model on the final test set and print classification report."""
