@@ -16,6 +16,7 @@ import re
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from sklearn.metrics import (
     accuracy_score,
     balanced_accuracy_score,
@@ -25,11 +26,13 @@ from sklearn.metrics import (
     recall_score,
     confusion_matrix
 )
+
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.model_selection import StratifiedShuffleSplit
 from torch.utils.data import Subset, WeightedRandomSampler
 from torch_geometric.data import Batch, Data, HeteroData
 from torch_geometric.loader import DataLoader
+
 from torch_geometric.nn import (
     HGTConv,
     Linear,
@@ -51,16 +54,6 @@ seed = 42
 torch.manual_seed(seed)
 np.random.seed(seed)
 
-    # Helper functions for training and evaluation
-    def get_weights(self, labels, min_num_classes, epsilon=1e-6):
-        """Compute class weights to handle class imbalance."""
-        counts = np.bincount(labels, minlength=min_num_classes).astype(np.float32)
-        counts[counts == 0] = epsilon  # avoid division by zero
-        weights = 1.0 / counts
-        weights = weights / np.sum(weights) * len(counts)  # normalize
-        weights[~np.isfinite(weights)] = epsilon  # handle any inf or nan
-        
-        
-        
-        return weights   
-        return self.early_stop 
+# only call IG here, because explanations are handled by the XAI module
+self.explainer = CaptumExplainer(self)
+explanation = self.explainer.explain(snapshot)
