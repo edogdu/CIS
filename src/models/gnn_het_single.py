@@ -1,5 +1,6 @@
 # Custom imports
 from models.encoders.hetero_encoder import GNNHeteroEncoderModel
+from src.xai.captum_explainer import CaptumExplainer
 
 # Standard library imports
 from datetime import datetime
@@ -34,37 +35,21 @@ from torch_geometric.nn import (
     Linear,
     global_max_pool,
 )
-import json
-from torch_geometric.explain import Explainer, GNNExplainer, HeteroExplanation
+
 from factories import data
 from models.focal_loss import FocalLoss
 from repositories.graphs.pyg_builder import get_hetero_column_names, visualize_features_distribution # for GNNExplainer feature names
 import copy
-from functools import partial
 from repositories.graphs.pyg_builder import y_labels
-import matplotlib.pyplot as plt
-import seaborn as sns
 from sklearn.preprocessing import RobustScaler
 
-# import moved file
-from models.encoders.hetero_encoder import GNNHeteroEncoderModel
-from src.xai import captum_explainer.py
-
 # Local application/library specific imports
-
-
 logging.info("Imported y_labels in gnn_het.py: %s", y_labels)
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 seed = 42
 torch.manual_seed(seed)
 np.random.seed(seed)
-
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-seed = 42
-torch.manual_seed(seed)
-np.random.seed(seed)
-    
 
     # Helper functions for training and evaluation
     def get_weights(self, labels, min_num_classes, epsilon=1e-6):
