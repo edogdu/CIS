@@ -65,60 +65,6 @@ seed = 42
 torch.manual_seed(seed)
 np.random.seed(seed)
     
-
-    def train_epoch(self, loader: DataLoader, optimizer: torch.optim.Optimizer):
-        self.train()
-        total_loss = 0
-        
-        try:
-            total_num = 0
-            y_all = []
-            y_pred_all = []
-            
-            for batch in loader:
-                batch = batch.to(DEVICE) 
-                optimizer.zero_grad()               
-                # Inside train_epoch, right before anom_logits = self(batch)
-                # if np.random.rand() < 0.01: # Check 1% of batches
-                #     logging.info(f"DEBUG CHECK - Batch y sum: {batch.y.sum().item()}")
-                #     logging.info(f"DEBUG CHECK - Connection feature mean: {batch['Connections'].x.mean(dim=0)}")
-                #     logging.info(f"DEBUG CHECK - Endpoint feature mean: {batch['Endpoints'].x.mean(dim=0)}")
-                #     logging.info(f"DEBUG CHECK - Sensor feature mean: {batch['FlowSensors'].x.mean(dim=0)}")
-                #     logging.info(f"DEBUG CHECK - Pump feature mean: {batch['Pumps'].x.mean(dim=0)}")
-                #     logging.info(f"DEBUG CHECK - Valve feature mean: {batch['Valves'].x.mean(dim=0)}")
-                #     logging.info(f"DEBUG CHECK - Tank feature mean: {batch['Tanks'].x.mean(dim=0)}")
-                    #logging.info(f"DEBUG CHECK - Asset feature mean: {batch['Assets'].x.mean(dim=0)}")
-                anom_logits = self(batch)      # [B,5]
-                y = batch.y.view(-1).long()
-                #loss = self.criterion(anom_logits, y)
-                loss = self.criterion(anom_logits, y)
-
-                # Add L1 regularization to the loss 
-                # l1_lambda = 5e-5
-                # l1_norm = sum(p.abs().sum() for p in self.parameters())
-                # loss = loss + l1_lambda * l1_norm
-
-                loss.backward()
-                #torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
-                optimizer.step()
-
-                total_loss += loss.item() * y.size(0)
-                total_num += y.size(0)
-
-                pred = anom_logits.argmax(dim=1)
-
-
-                y_all.extend(y.detach().cpu().tolist())
-                y_pred_all.extend(pred.detach().cpu().tolist())
-            # Apply gradient after accumulating over the batch to help with stability
-            # This allows for larger effective batch sizes and ensures that
-            # smaller classes are represented in each optimization step.
-            
-            mean_loss = total_loss / max(1, total_num)
-            return self.get_label_metrics(y_all, y_pred_all, mean_loss)
-        except Exception as e:
-            logging.error("Error during training epoch: %s", str(e))
-            raise e
         
         #logging.info("Epoch Train Loss: %.4f, Mean Anomaly Macro F1: %.4f, Mean Macro F1: %.4f, Mean Balanced Acc: %.4f",
         #             mean_loss, mean_anomaly_macro_f1, mean_macro_f1, mean_balanced_acc)
