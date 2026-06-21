@@ -52,3 +52,34 @@ class GNNTester(nn.Module):
         plt.ylabel("True")
         plt.savefig(f"./exports/images/gnn_het_classification_classify_confusion_matrix{int(time.time())}.png")
         plt.close()
+
+        #Get Explainability for all anomaly predictions
+        for i in range(len(y_pred_all)):
+            if y_pred_all[i] > 0:
+                logging.info("Generating explanation for test sample %d with predicted class %d (%s)", i, y_pred_all[i], y_labels[y_pred_all[i]])
+                data = test_loader.dataset[i]
+                explainer_results = self.explain_with_captum(data)
+                #Save or log explainer_results as needed
+        
+
+        return y_all, y_pred_all
+
+        
+
+        self.get_label_metrics(y_all, y_pred_all, total_loss / max(1, total_num), export_results=True)
+        report = classification_report(y_all, y_pred_all, target_names=y_labels, zero_division=0, output_dict=True)
+        report_df = pd.DataFrame(report).transpose()
+        report_df.to_csv(f"./exports/results/classification_report_classify_{test_description}.csv")
+
+                # Confusion Matrix
+        
+        # save confusion matrix image
+        cm = confusion_matrix(y_all, y_pred_all)
+        # add timestamp to filename to avoid overwriting
+        plt.figure(figsize=(10, 7))
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
+        plt.title("Confusion Matrix")
+        plt.xlabel("Predicted")
+        plt.ylabel("True")
+        plt.savefig(f"./exports/images/gnn_het_classification_classify_confusion_matrix{int(time.time())}.png")
+        plt.close()
