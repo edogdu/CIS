@@ -24,8 +24,6 @@ from models.training.focal_loss import FocalLoss
         # self.criterion = anom_criterion
         # return anom_criterion
       
-    # Training and evaluation functions
-
     # Helper functions for training and evaluation
     def get_weights(self, labels, min_num_classes, epsilon=1e-6):
         """Compute class weights to handle class imbalance."""
@@ -35,6 +33,5 @@ from models.training.focal_loss import FocalLoss
         weights = weights / np.sum(weights) * len(counts)  # normalize
         weights[~np.isfinite(weights)] = epsilon  # handle any inf or nan
         
-        
-        
         return weights   
+        return self.early_stop 
