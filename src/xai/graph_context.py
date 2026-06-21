@@ -1,5 +1,5 @@
 # Step 1 - Binary Explainer
-class BinaryExplainer:
+class BinaryExplainer:                # need to add extract_snapshot_metadata(), extract_node_ids(), and extract_feature_names()
 
     def __init__(self, model):
         self.model = model
