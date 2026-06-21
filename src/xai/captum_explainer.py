@@ -46,7 +46,7 @@ class CaptumExplainer:
         self.device = device
         self.n_steps = n_steps
 
-    def explain(
+    def explain(            # need to add explain_graph, and explain_snapshot
         self,
         data: HeteroData,
         target_class=None,
