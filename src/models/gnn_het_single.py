@@ -594,35 +594,4 @@ class GNNHeteroClassifierModel(nn.Module):
         
         
         return weights   
-
-class GNNEarlyStopping:
-    """Early stopping utility to stop training when 
-    macro F1 score across all anomaly classes does not improve.
-    We ignore the normal class (class 0) for early stopping as it is over-represented.    
-    """
-    def __init__(self, patience: int = 5, min_delta: float = 0.0001, mode: str = 'max'):
-        self.patience = patience
-        self.min_delta = min_delta
-        self.counter = 0
-        self.best_score = None
-        self.early_stop = False
-        self.mode = mode
-    
-    def step(self, val: float):
-        if self.best_score is None:
-            self.best_score = val
-        elif self.mode == 'max' and val > self.best_score + self.min_delta:
-            self.best_score = val
-            self.counter = 0
-        elif self.mode == 'min' and val < self.best_score - self.min_delta:
-            self.best_score = val
-            self.counter = 0
-        # elif val == 0.0:
-        #     # special case to avoid early stopping at beginning
-        #     pass
-        else:
-            self.counter += 1
-            if self.counter >= self.patience:
-                self.early_stop = True
-                    
         return self.early_stop 
