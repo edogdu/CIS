@@ -1,46 +1,14 @@
 # model should only know about: forward(), predict(), train(), evaluate(), save(), load()
 # XAI modules handle explanations
-
-import copy
 import logging
-import os
-import re
-import time
-from datetime import datetime
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict
 
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from sklearn.metrics import (
-    accuracy_score,
-    balanced_accuracy_score,
-    classification_report,
-    confusion_matrix,
-    f1_score,
-    precision_score,
-    recall_score,
-)
-
-from sklearn.model_selection import StratifiedShuffleSplit
-from sklearn.preprocessing import RobustScaler
-from sklearn.utils.class_weight import compute_class_weight
-
-from torch.utils.data import Subset
-from torch_geometric.data import Batch, HeteroData
-from torch_geometric.loader import DataLoader
-
-from repositories.graphs.pyg_builder import (
-    get_hetero_column_names,
-    y_labels,
-)
-
+from repositories.graphs.pyg_builder import y_labels
 from models.encoders.hetero_encoder import GNNHeteroEncoderModel
-from models.losses.focal_loss import FocalLoss
-from xai.captum_explainer import CaptumExplainer
 
 # Local application/library specific imports
 logging.info("Imported y_labels in gnn_het.py: %s", y_labels)
@@ -62,28 +30,38 @@ class GNNHeteroClassifierModel(nn.Module):
 
         self.encoder = GNNHeteroEncoderModel(
             config,
-            metadata
+            metadata,
         )
 
-        hd = config.get("hidden_dim", 64)
+        hd = config.get(
+            "hidden_dim",
+            64
+        )
 
         self.out = nn.Linear(
             hd,
             len(y_labels)
         )
 
-        explainer = CaptumExplainer(model)
-        
-        result = explainer.explain(graph)
-        
-        report = ExplanationReportGenerator()
-        
-        report.generate(
-            graph,
-            result,
-        )
-
         self.to(DEVICE)
 
-    def explain_snapshot(self, data):
-        return self.explainer.explain(data)
+    # optional helper method for basic explanation
+    def explain_snapshot(
+        self,
+        data,
+        save_dir="./exports/explanations",
+    ):
+        from xai.captum_explainer import CaptumExplainer
+        from xai.report_generator import ExplanationReportGenerator
+    
+        explainer = CaptumExplainer(self)
+    
+        result = explainer.explain(data)
+    
+        reporter = ExplanationReportGenerator()
+    
+        return reporter.generate(
+            data,
+            result,
+            save_dir=save_dir,
+        )
