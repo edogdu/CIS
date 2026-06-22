@@ -1,105 +1,175 @@
-# Step 1 - Binary Explainer
-class BinaryExplainer:                # need to add extract_snapshot_metadata(), extract_node_ids(), and extract_feature_names()
+import torch
+from torch_geometric.data import HeteroData
 
-    def __init__(self, model):
-        self.model = model
-        self.ig = IntegratedGradients(self.forward)
+from repositories.graphs.pyg_builder import (
+    get_hetero_column_names,
+)
 
-    def forward(self, data):
-        bin_logits, _ = self.model(data)
-        return bin_logits
+# Captum expects a plain callable
 
-    def explain(self, data):
-        attr = self.ig.attribute(data.x_dict, target=1)
-        return attr
-
-    # wrapper function
-    def _fast_model_forward_wrapper(model: nn.Module, data: HeteroData, model_device: str, *node_inputs: torch.Tensor):
-        """
-        Optimized wrapper for Captum. Reconstructs the batched graph from interpolated inputs.
-        """
-        # Create a lightweight container
-        temp_data = HeteroData()
-        
-        # Identify node types with features
-        node_types_with_features = [ntype for ntype in data.x_dict.keys() 
-                                    if data[ntype].num_nodes > 0 and hasattr(data[ntype], "x")]
-        
-        # Determine Batching Params
-        first_input = node_inputs[0]
-        original_num_nodes = data[node_types_with_features[0]].num_nodes
-        total_nodes = first_input.size(0)
-        
-        is_batched = total_nodes != original_num_nodes
-        num_replications = total_nodes // original_num_nodes if is_batched else 1
-        
-        
-        temp_data.num_graphs = num_replications
+# wrapper function
+def _fast_model_forward_wrapper(model: nn.Module, data: HeteroData, model_device: str, *node_inputs: torch.Tensor):
+    """
+    Optimized wrapper for Captum. Reconstructs the batched graph from interpolated inputs.
+    """
+    # Create a lightweight container
+    temp_data = HeteroData()
     
-        # Reconstruct Node Features & Batch Vector
-        for idx, ntype in enumerate(node_types_with_features):
-            temp_data[ntype].x = node_inputs[idx]
-            
-            if is_batched:
-                current_num_nodes = data[ntype].num_nodes
-                # Create batch vector [0,0... 1,1...]
-                batch_ids = torch.arange(num_replications, device=model_device)
-                temp_data[ntype].batch = torch.repeat_interleave(batch_ids, current_num_nodes)
-            else:
-                temp_data[ntype].batch = torch.zeros(data[ntype].num_nodes, dtype=torch.long, device=model_device)
+    # Identify node types with features
+    node_types_with_features = [ntype for ntype in data.x_dict.keys() 
+                                if data[ntype].num_nodes > 0 and hasattr(data[ntype], "x")]
     
-        # Reconstruct Edges (Vectorized)
-        if not is_batched:
-            temp_data.edge_index_dict = data.edge_index_dict
+    # Determine Batching Params
+    first_input = node_inputs[0]
+    original_num_nodes = data[node_types_with_features[0]].num_nodes
+    total_nodes = first_input.size(0)
+    
+    is_batched = total_nodes != original_num_nodes
+    num_replications = total_nodes // original_num_nodes if is_batched else 1
+    
+    
+    temp_data.num_graphs = num_replications
+
+    # Reconstruct Node Features & Batch Vector
+    for idx, ntype in enumerate(node_types_with_features):
+        temp_data[ntype].x = node_inputs[idx]
+        
+        if is_batched:
+            current_num_nodes = data[ntype].num_nodes
+            # Create batch vector [0,0... 1,1...]
+            batch_ids = torch.arange(num_replications, device=model_device)
+            temp_data[ntype].batch = torch.repeat_interleave(batch_ids, current_num_nodes)
         else:
-            new_edge_index_dict = {}
-            for etype, edge_index in data.edge_index_dict.items():
-                # Standard edge replication logic
-                num_edges = edge_index.size(1)
-                src_ntype, _, dst_ntype = etype
-                src_count = data[src_ntype].num_nodes
-                dst_count = data[dst_ntype].num_nodes
-                
-                # Create offsets
-                offsets_src = (torch.arange(num_replications, device=model_device) * src_count).view(-1, 1)
-                offsets_dst = (torch.arange(num_replications, device=model_device) * dst_count).view(-1, 1)
-                
-                # Expand edges [2, num_edges] -> [num_reps, 2, num_edges]
-                edges_expanded = edge_index.unsqueeze(0).expand(num_replications, 2, num_edges).clone()
-                
-                # Add offsets
-                edges_expanded[:, 0, :] += offsets_src
-                edges_expanded[:, 1, :] += offsets_dst
-                
-                # Flatten to [2, total_edges]
-                new_edge_index_dict[etype] = edges_expanded.permute(1, 0, 2).reshape(2, -1)
-                
-            temp_data.edge_index_dict = new_edge_index_dict
-    
-        # Run Model
-        return model(temp_data)
+            temp_data[ntype].batch = torch.zeros(data[ntype].num_nodes, dtype=torch.long, device=model_device)
 
-# Step 2 - Attack Explainer
-class AttackExplainer:
+    # Reconstruct Edges (Vectorized)
+    if not is_batched:
+        temp_data.edge_index_dict = data.edge_index_dict
+    else:
+        new_edge_index_dict = {}
+        for etype, edge_index in data.edge_index_dict.items():
+            # Standard edge replication logic
+            num_edges = edge_index.size(1)
+            src_ntype, _, dst_ntype = etype
+            src_count = data[src_ntype].num_nodes
+            dst_count = data[dst_ntype].num_nodes
+            
+            # Create offsets
+            offsets_src = (torch.arange(num_replications, device=model_device) * src_count).view(-1, 1)
+            offsets_dst = (torch.arange(num_replications, device=model_device) * dst_count).view(-1, 1)
+            
+            # Expand edges [2, num_edges] -> [num_reps, 2, num_edges]
+            edges_expanded = edge_index.unsqueeze(0).expand(num_replications, 2, num_edges).clone()
+            
+            # Add offsets
+            edges_expanded[:, 0, :] += offsets_src
+            edges_expanded[:, 1, :] += offsets_dst
+            
+            # Flatten to [2, total_edges]
+            new_edge_index_dict[etype] = edges_expanded.permute(1, 0, 2).reshape(2, -1)
+            
+        temp_data.edge_index_dict = new_edge_index_dict
 
-    def __init__(self, model):
-        self.model = model
-        self.ig = IntegratedGradients(self.forward)
+    # Run Model
+    return model(temp_data)
 
-    def forward(self, data):
-        _, anom_logits = self.model(data)
-        return anom_logits
+# extract snapshot metadata
+def extract_snapshot_metadata(
+    data,
+    y_labels,
+):
+    snapshot_id = "unknown"
 
-    def explain(self, data, class_idx):
-        attr = self.ig.attribute(data.x_dict, target=class_idx)
-        return attr
+    if hasattr(data, "snapshot_id"):
+        raw = data.snapshot_id
 
-# Step 3 - Node Aggregation
-# convert feature level to node level
-# map it afterward
-node_score = attr.mean(dim=feature_dim)
+        if torch.is_tensor(raw):
+            if raw.numel() == 1:
+                snapshot_id = str(raw.item())
+            else:
+                snapshot_id = str(raw.tolist())
+        else:
+            snapshot_id = str(raw)
 
-# Step 4 - Graph Context
-neighbors = graph.get_neighbors(top_nodes)
+    true_idx = -1
+    true_name = "Unknown"
 
-# Step 5 is in separate file for generating reports...
+    if hasattr(data, "y"):
+        if data.y.numel() == 1:
+            true_idx = int(data.y.item())
+
+            if (
+                true_idx >= 0
+                and true_idx < len(y_labels)
+            ):
+                true_name = y_labels[true_idx]
+
+    return {
+        "snapshot_id": snapshot_id,
+        "true_label_idx": true_idx,
+        "true_label_name": true_name,
+    }
+
+# extract node IDs
+def extract_node_ids(
+    data,
+    ntype,
+    num_nodes,
+):
+    orig_ids = []
+
+    if hasattr(data[ntype], "original_id"):
+        raw = data[ntype].original_id
+
+        orig_ids = (
+            raw.tolist()
+            if torch.is_tensor(raw)
+            else raw
+        )
+
+    elif hasattr(data[ntype], "n_id"):
+        orig_ids = data[ntype].n_id.tolist()
+
+    if len(orig_ids) != num_nodes:
+        orig_ids = [
+            f"{ntype}_{i}"
+            for i in range(num_nodes)
+        ]
+
+    return orig_ids
+
+# extract feature names
+def extract_feature_names(
+    ntype,
+    num_features,
+):
+    try:
+        key = ntype
+
+        if ntype in [
+            "TankMeasurements",
+            "ValveMeasurements",
+        ]:
+            key = "Measurements"
+
+        elif ntype in [
+            "PumpMeasurements",
+            "SensorMeasurements",
+        ]:
+            key = "StateMeasurements"
+
+        elif not ntype.endswith("s"):
+            key = ntype + "s"
+
+        names = get_hetero_column_names(key)
+
+        if len(names) == num_features:
+            return names
+
+    except Exception:
+        pass
+
+    return [
+        f"feat_{i}"
+        for i in range(num_features)
+    ]
