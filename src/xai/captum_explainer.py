@@ -1,5 +1,6 @@
 # captum_explainer.py
 # tasks: prepare inputs, run IG, and return raw attributions
+# need to add explain_graph, and explain_snapshot
 
 # imports
 import logging
@@ -19,7 +20,7 @@ import torch.nn as nn
 
 from captum.attr import IntegratedGradients
 from torch_geometric.data import Batch, HeteroData
-from xai.graph_context import fast_model_forward_wrapper
+from src.xai.graph_context import fast_model_forward_wrapper
 
 from repositories.graphs.pyg_builder import (
     get_hetero_column_names,
@@ -46,54 +47,75 @@ class CaptumExplainer:
         self.device = device
         self.n_steps = n_steps
 
-    def explain(            # need to add explain_graph, and explain_snapshot
+    def explain(
         self,
         data: HeteroData,
         target_class=None,
     ):
         self.model.eval()
-
         data = data.to(self.device)
-
+    
         with torch.no_grad():
             logits = self.model(data)
-
+            probs = torch.softmax(logits, dim=1)
+    
         if target_class is None:
             target_class = logits.argmax(dim=1).item()
-
+    
+        confidence = probs[0, target_class].item()
+    
         inputs = []
         node_types = []
-
+    
         for ntype in data.x_dict:
-            if hasattr(data[ntype], "x"):
+            if (
+                hasattr(data[ntype], "x")
+                and data[ntype].x is not None
+                and data[ntype].num_nodes > 0
+            ):
                 inputs.append(
-                    data[ntype].x.detach().clone().requires_grad_(True)
+                    data[ntype]
+                    .x
+                    .detach()
+                    .clone()
+                    .to(self.device)
+                    .requires_grad_(True)
                 )
                 node_types.append(ntype)
-
+    
         inputs = tuple(inputs)
-        baselines = tuple(torch.zeros_like(x) for x in inputs)
-
+        baselines = tuple(
+            torch.zeros_like(x)
+            for x in inputs
+        )
+    
         forward_func = partial(
             fast_model_forward_wrapper,
             self.model,
             data,
             self.device,
         )
-
+    
         ig = IntegratedGradients(forward_func)
-
-        attributions = ig.attribute(
-            inputs=inputs,
-            baselines=baselines,
-            target=target_class,
-            n_steps=self.n_steps,
-            internal_batch_size=10,
-        )
-
+    
+        try:
+            attributions = ig.attribute(
+                inputs=inputs,
+                baselines=baselines,
+                target=target_class,
+                n_steps=self.n_steps,
+                internal_batch_size=10,
+            )
+        except Exception:
+            logging.exception(
+                "Captum attribution failed."
+            )
+            return None
+    
         return {
             "target_class": target_class,
             "confidence": confidence,
+            "logits": logits.detach().cpu(),
             "node_types": node_types,
             "attributions": attributions,
         }
