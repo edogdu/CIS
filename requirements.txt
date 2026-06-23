@@ -21,6 +21,19 @@ neo4j
 #lime
 # Torch Geometric Explainer is integrated into torch-geometric
 
+torch
+torch-geometric
+numpy
+pandas
+scikit-learn
+matplotlib
+seaborn
+networkx
+neo4j
+psycopg2-binary
+kafka-python
+streamlit
+captum
 
 # Other utilities
 python-dotenv
