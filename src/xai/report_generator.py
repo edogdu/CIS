@@ -1,5 +1,7 @@
 from captum_explainer import CaptumExplainer
 
+# report_generator
+
 class ExplanationReportGenerator:
 
     def __init__(self):
@@ -11,6 +13,9 @@ class ExplanationReportGenerator:
         explanation,
         save_dir="./exports/explanations"
     ):
+        os.makedirs(save_dir, exist_ok=True)
+        # TODO: better implement report generation
+        pass
   
     def generate_json(
         self,
