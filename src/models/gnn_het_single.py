@@ -60,7 +60,7 @@ class GNNHeteroClassifierModel(nn.Module):
     
         reporter = ExplanationReportGenerator()
     
-        return reporter.generate(
+        return reporter.generate_report(
             data,
             result,
             save_dir=save_dir,
