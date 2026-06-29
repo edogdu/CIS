@@ -3,6 +3,7 @@
 
 import torch
 from torch_geometric.data import HeteroData
+from collections import defaultdict
 
 # Captum expects a plain callable
 
@@ -181,3 +182,22 @@ def extract_node_context(data, ntype, original_id):
 
     context_lookup = getattr(data, "context_lookup", {})
     return context_lookup.get(ntype, {}).get(original_id, {})
+
+def build_node_context(data, raw_snapshot_single):
+    """
+    Build context from snapshot["nodes"] structure:
+    each node has: id, labels, properties
+    """
+
+    context = defaultdict(dict)
+
+    for node in raw_snapshot_single["nodes"]:
+        # node type is stored in labels[0]
+        ntype = node["labels"][0]
+        oid = node["id"]
+        props = node.get("properties", {})
+
+        context[ntype][oid] = props
+
+    data.context_lookup = context
+    return context
