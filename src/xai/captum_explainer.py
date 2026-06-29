@@ -20,12 +20,6 @@ import torch.nn as nn
 
 from captum.attr import IntegratedGradients
 from torch_geometric.data import Batch, HeteroData
-from src.xai.graph_context import fast_model_forward_wrapper
-
-from repositories.graphs.pyg_builder import (
-    get_hetero_column_names,
-    y_labels,
-)
 
 # logging information
 logging.info("Imported y_labels in gnn_het.py: %s", y_labels)
@@ -54,19 +48,19 @@ class CaptumExplainer:
     ):
         self.model.eval()
         data = data.to(self.device)
-    
+
         with torch.no_grad():
             logits = self.model(data)
             probs = torch.softmax(logits, dim=1)
-    
+
         if target_class is None:
             target_class = logits.argmax(dim=1).item()
-    
+
         confidence = probs[0, target_class].item()
-    
+
         inputs = []
         node_types = []
-    
+
         for ntype in data.x_dict:
             if (
                 hasattr(data[ntype], "x")
@@ -82,22 +76,22 @@ class CaptumExplainer:
                     .requires_grad_(True)
                 )
                 node_types.append(ntype)
-    
+
         inputs = tuple(inputs)
         baselines = tuple(
             torch.zeros_like(x)
             for x in inputs
         )
-    
+
         forward_func = partial(
-            fast_model_forward_wrapper,
+            _fast_model_forward_wrapper,
             self.model,
             data,
             self.device,
         )
-    
+
         ig = IntegratedGradients(forward_func)
-    
+
         try:
             attributions = ig.attribute(
                 inputs=inputs,
@@ -111,7 +105,7 @@ class CaptumExplainer:
                 "Captum attribution failed."
             )
             return None
-    
+
         return {
             "target_class": target_class,
             "confidence": confidence,
