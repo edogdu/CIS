@@ -1,0 +1,31 @@
+**XAI Pipeline:**
+<br>
+CaptumExplainer
+<br>
+        ↓
+<br>
+raw tensors
+<br>
+        ↓
+<br>
+FeatureRanker
+<br>
+        ↓
+<br>
+NodeExplainer
+<br>
+        ↓
+<br>
+GraphContext
+<br>
+        ↓
+<br>
+RecommendationEngine
+<br>
+        ↓
+<br>
+ExplanationReportGenerator
+<br>
+        ↓
+<br>
+Explanation dataclass
