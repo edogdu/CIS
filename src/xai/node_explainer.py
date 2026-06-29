@@ -4,26 +4,18 @@ from typing import List, Dict
 import torch
 import numpy as np
 
-
 class NodeExplainer:
 
     @staticmethod
-    def compute_node_importances(
-        attr_tensor: torch.Tensor
-    ) -> np.ndarray:
+    def compute_node_importances(attr_tensor):
         """
-        Computes a single importance score per node.
-
-        Input:
-            [num_nodes, num_features]
-
-        Output:
-            [num_nodes]
+        attr_tensor: [num_nodes, num_features]
+        returns: [num_nodes]
         """
         return (
-            attr_tensor
-            .abs()
+            attr_tensor.abs()
             .sum(dim=1)
+            .detach()
             .cpu()
             .numpy()
         )
@@ -31,65 +23,41 @@ class NodeExplainer:
     @staticmethod
     def rank_nodes(
         data,
-        ntype: str,
-        attr_tensor: torch.Tensor,
+        ntype,
+        attr_tensor,
         snapshot_id=None,
         true_label=None,
         pred_label=None,
-        threshold: float = 1e-4,
-    ) -> List[Dict]:
+        threshold=0.0,
+    ):
         """
-        Creates ranked node importance records.
+        Rank nodes of a given type by importance.
         """
 
-        node_imp = NodeExplainer.compute_node_importances(
-            attr_tensor
-        )
-
+        node_imp = NodeExplainer.compute_node_importances(attr_tensor)
         num_nodes = len(node_imp)
 
-        #
-        # Recover original IDs
-        #
-        orig_ids = []
+        # original IDs
+        orig_ids = data[ntype].original_id
 
-        if hasattr(data[ntype], "original_id"):
-            raw = data[ntype].original_id
-            orig_ids = (
-                raw.tolist()
-                if torch.is_tensor(raw)
-                else raw
-            )
-
-        elif hasattr(data[ntype], "n_id"):
-            orig_ids = data[ntype].n_id.tolist()
-
-        if len(orig_ids) != num_nodes:
-            orig_ids = [
-                f"{ntype}_{i}"
-                for i in range(num_nodes)
-            ]
-
-        #
-        # Build records
-        #
+        # build records
         rankings = []
-
-        for i, score in enumerate(node_imp):
+        for i in range(num_nodes):
+            score = float(node_imp[i])
             if score <= threshold:
                 continue
 
-            rankings.append(
-                {
-                    "snapshot_id": snapshot_id,
-                    "node_type": ntype,
-                    "pyg_index": i,
-                    "original_id": str(orig_ids[i]),
-                    "importance_score": float(score),
-                    "true_label": true_label,
-                    "pred_label": pred_label,
-                }
-            )
+            oid = orig_ids[i]
+
+            rankings.append({
+                "snapshot_id": snapshot_id,
+                "node_type": ntype,
+                "pyg_index": i,
+                "original_id": oid,
+                "importance_score": score,
+                "true_label": true_label,
+                "pred_label": pred_label,
+            })
 
         rankings.sort(
             key=lambda x: x["importance_score"],
@@ -97,3 +65,18 @@ class NodeExplainer:
         )
 
         return rankings
+
+    # metadata inspector
+    def inspect_node(data, node_type, idx, score):
+        original_id = data[node_type].original_id[idx]
+        feature_names = data[node_type].feature_names
+        feature_values = data[node_type].x[idx].tolist()
+        context = data.context_lookup.get(node_type, {}).get(original_id, {})
+
+        return {
+            "node_type": node_type,
+            "original_id": original_id,
+            "score": float(score),
+            "features": dict(zip(feature_names, feature_values)),
+            "context": context,
+        }
